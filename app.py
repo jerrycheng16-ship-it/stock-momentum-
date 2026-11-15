@@ -53,7 +53,7 @@ with st.sidebar:
             "波動度「高於 (>)」門檻為趨勢盤",
         ],
         index=0,
-        help="趨勢盤時會依據均線操作；盤整盤時則無條件維持做多持有。",
+        help="趨勢盤時會依據均線操作；盤整盤時則依據下方設定的盤整盤規則執行。",
     )
     is_low_vol_trend = trend_condition == "波動度「低於 (<)」門檻為趨勢盤"
     op_symbol = "<" if is_low_vol_trend else ">"
@@ -70,6 +70,9 @@ with st.sidebar:
         / 100.0
     )
 
+    st.markdown("---")
+    st.subheader("🎯 盤勢動作設定")
+
     breakdown_action = st.radio(
         "趨勢盤跌破均線時的動作",
         options=[
@@ -80,14 +83,25 @@ with st.sidebar:
         help="平倉空手：跌破均線時持有現金（報酬 0%）；反向做空：跌破均線時放空標的（股價下跌時獲利）。",
     )
     short_on_breakdown = breakdown_action == "反向做空 (部位 = -1)"
-    breakdown_text = "反向做空" if short_on_breakdown else "平倉賣出"
+    breakdown_text = "反向做空 (-1)" if short_on_breakdown else "平倉空手 (0)"
+
+    consolidation_action = st.radio(
+        "盤整盤時的交易動作",
+        options=[
+            "維持買入部位 (部位 = +1)",
+            "維持前一日部位 (不動作)",
+            "全部平倉空手 (部位 = 0)",
+        ],
+        index=0,
+        help="維持買入部位：忽略均線、無條件做多；維持前一日部位：沿用進入盤整盤前的多空/空手狀態；全部平倉空手：盤整期間退出觀望。",
+    )
 
     st.markdown("---")
     st.markdown(f"""
     **目前交易邏輯：**
     * **波動度計算**：過去 `{vol_window}` 個交易日之年化波動度。
-    * **趨勢盤 (`波動度 {op_symbol} {vol_threshold*100:.1f}%`)**：股價 > `{ma_window}` 日均線買入，跌破則**{breakdown_text}**。
-    * **盤整盤 (`波動度 {opposite_symbol} {vol_threshold*100:.1f}%`)**：維持買入持有（做多）。
+    * **趨勢盤 (`波動度 {op_symbol} {vol_threshold*100:.1f}%`)**：股價 > `{ma_window}` 日均線買入 (`+1`)，跌破則**{breakdown_text}**。
+    * **盤整盤 (`波動度 {opposite_symbol} {vol_threshold*100:.1f}%`)**：**{consolidation_action}**。
     * **執行延遲**：當日收盤確認訊號，次一交易日生效。
     """)
 
@@ -187,20 +201,28 @@ if ticker:
             else:
                 df["Is_Trend"] = df["Vol"] > vol_threshold
 
-            # 跌破均線時的目標部位：空手為 0，做空為 -1
+            # 趨勢盤下的均線訊號
             below_ma_pos = -1 if short_on_breakdown else 0
+            trend_signal = np.where(df["Close"] > df["MA"], 1, below_ma_pos)
 
-            # 訊號邏輯：趨勢盤看均線 (Close > MA -> 1 else below_ma_pos)，盤整盤維持買入 (1)
-            df["Signal"] = np.where(
-                df["Is_Trend"], np.where(df["Close"] > df["MA"], 1, below_ma_pos), 1
-            )
+            # 盤整盤下的訊號處理
+            if consolidation_action == "維持買入部位 (部位 = +1)":
+                df["Signal"] = np.where(df["Is_Trend"], trend_signal, 1)
+            elif consolidation_action == "全部平倉空手 (部位 = 0)":
+                df["Signal"] = np.where(df["Is_Trend"], trend_signal, 0)
+            else:
+                # 維持前一日部位 (不動作)：盤整盤設為 NaN 並向後填補前值；若回測首日即為盤整盤則預設為 1
+                raw_sig = pd.Series(
+                    np.where(df["Is_Trend"], trend_signal, np.nan),
+                    index=df.index,
+                )
+                df["Signal"] = raw_sig.ffill().fillna(1)
 
             # 實際部位：昨日收盤確認訊號，今日持有 (避免前視偏誤)
-            df["Position"] = df["Signal"].shift(1).fillna(1)
+            df["Position"] = df["Signal"].shift(1).fillna(df["Signal"].iloc[0])
 
             # 偵測部位切換點（進出場訊號發生日）
             df["Pos_Change"] = df["Position"].diff()
-            # 第一天若直接持有部位也標記為初始進場
             df.iloc[0, df.columns.get_loc("Pos_Change")] = df["Position"].iloc[0]
 
             buy_signals = df[(df["Pos_Change"] != 0) & (df["Position"] == 1)]
@@ -227,7 +249,7 @@ if ticker:
             bh_metrics = calculate_metrics(df["BH_Ret"], None)
 
             st.subheader(
-                f"📊 {ticker.upper()} 績效指標比較 (波動度 {op_symbol} {vol_threshold*100:.1f}% 為趨勢盤｜跌破均線：{breakdown_text})"
+                f"📊 {ticker.upper()} 績效指標比較 (波動度 {op_symbol} {vol_threshold*100:.1f}% 為趨勢盤)"
             )
 
             metrics_df = pd.DataFrame(
@@ -381,106 +403,3 @@ if ticker:
                 ),
                 row=2,
                 col=1,
-            )
-
-            # --- Row 3: Drawdown 曲線 ---
-            fig.add_trace(
-                go.Scatter(
-                    x=df.index,
-                    y=df["Strat_DD"] * 100,
-                    name="策略 Drawdown",
-                    fill="tozeroy",
-                    line=dict(color="#1f77b4", width=1.2),
-                    fillcolor="rgba(31, 119, 180, 0.2)",
-                ),
-                row=3,
-                col=1,
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    x=df.index,
-                    y=df["BH_DD"] * 100,
-                    name="Buy & Hold Drawdown",
-                    line=dict(color="#d62728", width=1.2),
-                ),
-                row=3,
-                col=1,
-            )
-
-            # --- Row 4: 波動度與門檻線 ---
-            fig.add_trace(
-                go.Scatter(
-                    x=df.index,
-                    y=df["Vol"] * 100,
-                    name=f"{vol_window}日年化波動度",
-                    line=dict(color="#9467bd", width=1.5),
-                ),
-                row=4,
-                col=1,
-            )
-
-            fig.add_hline(
-                y=vol_threshold * 100,
-                line_dash="dash",
-                line_color="red",
-                annotation_text=f"門檻 ({vol_threshold*100:.1f}%)",
-                row=4,
-                col=1,
-            )
-
-            # 標示趨勢盤與盤整盤區間（同步繪製在 Row 1 價格圖與 Row 2 淨值圖）
-            df["Regime_Group"] = (
-                df["Is_Trend"] != df["Is_Trend"].shift()
-            ).cumsum()
-            for _, group in df.groupby("Regime_Group"):
-                is_trend = group["Is_Trend"].iloc[0]
-                x0 = group.index[0]
-                x1 = group.index[-1]
-                fill_color = (
-                    "rgba(100, 181, 246, 0.18)"
-                    if is_trend
-                    else "rgba(255, 167, 38, 0.18)"
-                )
-
-                for r in [1, 2]:
-                    fig.add_vrect(
-                        x0=x0,
-                        x1=x1,
-                        fillcolor=fill_color,
-                        layer="below",
-                        line_width=0,
-                        row=r,
-                        col=1,
-                    )
-
-            # 圖表版面配置
-            fig.update_layout(
-                height=1050,
-                hovermode="x unified",
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.01,
-                    xanchor="right",
-                    x=1,
-                ),
-                margin=dict(l=20, r=20, t=70, b=20),
-            )
-            fig.update_yaxes(title_text="價格", row=1, col=1)
-            fig.update_yaxes(title_text="淨值 (倍數)", row=2, col=1)
-            fig.update_yaxes(title_text="回撤 (%)", row=3, col=1)
-            fig.update_yaxes(title_text="波動度 (%)", row=4, col=1)
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            # 6. 盤勢與倉位狀態統計摘要
-            trend_pct = df["Is_Trend"].mean() * 100
-            long_pct = (df["Position"] == 1).mean() * 100
-            flat_pct = (df["Position"] == 0).mean() * 100
-            short_pct = (df["Position"] == -1).mean() * 100
-
-            st.info(
-                f"💡 **區間與倉位統計**：回測期間內**趨勢盤**佔比 `{trend_pct:.1f}%`、**盤整盤**佔比 `{100-trend_pct:.1f}%`｜"
-                f"倉位時間分佈：**做多** `{long_pct:.1f}%`、**空手** `{flat_pct:.1f}%`、**做空** `{short_pct:.1f}%`。"
-            )
