@@ -8,7 +8,7 @@ import yfinance as yf
 
 # 頁面設定
 st.set_page_config(page_title="波動度濾網與均線策略回測", layout="wide")
-st.title("📈 波動度狀態切換 × 3月均線策略回測系統")
+st.title("📈 波動度狀態切換 × 均線策略回測系統")
 
 # --- 側邊欄參數設定 ---
 with st.sidebar:
@@ -25,6 +25,27 @@ with st.sidebar:
     with col2:
         end_date = st.date_input("結束日期", value=datetime.today())
 
+    st.markdown("---")
+    st.subheader("📐 指標天數與門檻設定")
+
+    vol_window = st.number_input(
+        "波動度計算天數 (交易日)",
+        min_value=5,
+        max_value=1000,
+        value=252,
+        step=1,
+        help="預設 252 個交易日（約 12 個月），63 天約為 3 個月，21 天約為 1 個月。",
+    )
+
+    ma_window = st.number_input(
+        "均線計算天數 (交易日)",
+        min_value=2,
+        max_value=500,
+        value=63,
+        step=1,
+        help="預設 63 個交易日（約 3 個月季線），20 天約為月線，200 天為年線。",
+    )
+
     vol_threshold = (
         st.slider(
             "趨勢盤波動度門檻 (%)",
@@ -32,26 +53,27 @@ with st.sidebar:
             max_value=60.0,
             value=20.0,
             step=0.5,
-            help="當12個月年化波動度小於此數值時，判定為趨勢盤（啟用均線停損）；大於等於此數值則為盤整盤（維持買入）。",
+            help="當波動度小於此數值時，判定為趨勢盤（啟用均線停損）；大於等於此數值則為盤整盤（維持買入）。",
         )
         / 100.0
     )
 
     st.markdown("---")
-    st.markdown("""
-    **交易邏輯說明：**
-    * **波動度計算**：過去 252 個交易日之年化波動度。
-    * **趨勢盤 (`波動度 < 門檻`)**：股價 > 63日均線買入，跌破賣出。
-    * **盤整盤 (`波動度 >= 門檻`)**：維持買入持有。
-    * **執行延遲**：當日收盤確認訊號，次一交易日開盤/收盤生效。
+    st.markdown(f"""
+    **目前交易邏輯：**
+    * **波動度計算**：過去 `{vol_window}` 個交易日之年化波動度。
+    * **趨勢盤 (`波動度 < {vol_threshold*100:.1f}%`)**：股價 > `{ma_window}` 日均線買入，跌破賣出。
+    * **盤整盤 (`波動度 >= {vol_threshold*100:.1f}%`)**：維持買入持有。
+    * **執行延遲**：當日收盤確認訊號，次一交易日生效。
     """)
 
 
 # --- 數據獲取與快取 ---
 @st.cache_data(ttl=3600)
-def load_data(symbol, start, end):
-    # 多抓取 400 天資料以確保回測起始日有足夠的 252 日均線與波動度數據
-    fetch_start = start - timedelta(days=400)
+def load_data(symbol, start, end, lookback_days):
+    # 根據使用者設定的最大天數，動態換算日曆天數往前多抓資料（乘以 1.6 涵蓋假日與休市）
+    buffer_calendar_days = int(lookback_days * 1.6) + 30
+    fetch_start = start - timedelta(days=buffer_calendar_days)
     df = yf.download(symbol, start=fetch_start, end=end, progress=False)
     if df.empty:
         return df
@@ -77,23 +99,26 @@ def calculate_metrics(returns_series, position_series=None):
     drawdown = (cum_returns - rolling_max) / rolling_max
     max_dd = drawdown.min()
 
-    # 勝率計算 (計算持有期間的日勝率，以及完整交易筆數勝率)
+    # 勝率計算
     if position_series is not None:
         active_days = returns_series[position_series > 0]
         daily_win_rate = (
             (active_days > 0).mean() if len(active_days) > 0 else 0.0
         )
 
-        # 計算單筆交易勝率
+        # 計算單筆波段交易勝率
         pos_diff = position_series.diff().fillna(0)
         entries = position_series[
             (pos_diff == 1)
-            | ((position_series == 1) & (position_series.index == position_series.index[0]))
+            | (
+                (position_series == 1)
+                & (position_series.index == position_series.index[0])
+            )
         ].index
         exits = position_series[pos_diff == -1].index
 
         trade_returns = []
-        for i, entry_date in enumerate(entries):
+        for entry_date in entries:
             future_exits = exits[exits > entry_date]
             if len(future_exits) > 0:
                 exit_date = future_exits[0]
@@ -134,7 +159,8 @@ def calculate_metrics(returns_series, position_series=None):
 
 # --- 主程式執行 ---
 if ticker:
-    raw_df = load_data(ticker, start_date, end_date)
+    max_lookback = max(vol_window, ma_window)
+    raw_df = load_data(ticker, start_date, end_date, max_lookback)
 
     if raw_df.empty:
         st.error(f"找不到代號 `{ticker}` 的資料，請確認股票代號與日期範圍是否正確。")
@@ -142,23 +168,22 @@ if ticker:
         df = raw_df[["Close"]].copy()
         df["Ret"] = df["Close"].pct_change()
 
-        # 1. 計算指標 (12個月 = 252交易日, 3個月 = 63交易日)
-        df["Vol_12M"] = df["Ret"].rolling(window=252).std() * np.sqrt(252)
-        df["MA_3M"] = df["Close"].rolling(window=63).mean()
+        # 1. 動態計算自訂天數的波動度與均線
+        df["Vol"] = df["Ret"].rolling(window=int(vol_window)).std() * np.sqrt(252)
+        df["MA"] = df["Close"].rolling(window=int(ma_window)).mean()
 
         # 過濾至使用者指定的回測起始日
         df = df[df.index >= pd.to_datetime(start_date)].dropna().copy()
 
         if len(df) < 10:
-            st.warning("有效回測資料過少，請將開始日期往前調整。")
+            st.warning("有效回測資料過少，請將開始日期往前調整，或縮短指標計算天數。")
         else:
             # 2. 判斷盤勢與訊號
-            # True = 趨勢盤 (波動度 < 門檻), False = 盤整盤
-            df["Is_Trend"] = df["Vol_12M"] < vol_threshold
+            df["Is_Trend"] = df["Vol"] < vol_threshold
 
-            # 訊號邏輯：趨勢盤看均線 (Close > MA_3M -> 1 else 0)，盤整盤維持買入 (1)
+            # 訊號邏輯：趨勢盤看均線 (Close > MA -> 1 else 0)，盤整盤維持買入 (1)
             df["Signal"] = np.where(
-                df["Is_Trend"], np.where(df["Close"] > df["MA_3M"], 1, 0), 1
+                df["Is_Trend"], np.where(df["Close"] > df["MA"], 1, 0), 1
             )
 
             # 實際部位：昨日收盤確認訊號，今日持有 (避免前視偏誤)
@@ -183,39 +208,44 @@ if ticker:
             strat_metrics = calculate_metrics(df["Strat_Ret"], df["Position"])
             bh_metrics = calculate_metrics(df["BH_Ret"], None)
 
-            st.subheader(f"📊 {ticker.upper()} 績效指標比較")
+            st.subheader(
+                f"📊 {ticker.upper()} 績效指標比較 ({vol_window}日波動度 / {ma_window}日均線)"
+            )
 
-            metrics_df = pd.DataFrame({
-                "策略表現": [
-                    f"{strat_metrics['總報酬率']*100:.2f}%",
-                    f"{strat_metrics['年化報酬率']*100:.2f}%",
-                    f"{strat_metrics['年化波動度']*100:.2f}%",
-                    f"{strat_metrics['最大回撤 (MDD)']*100:.2f}%",
-                    f"{strat_metrics['波段交易勝率']*100:.2f}% ({strat_metrics['總交易次數']}次)",
-                    f"{strat_metrics['交易日勝率']*100:.2f}%",
+            metrics_df = pd.DataFrame(
+                {
+                    "策略表現": [
+                        f"{strat_metrics['總報酬率']*100:.2f}%",
+                        f"{strat_metrics['年化報酬率']*100:.2f}%",
+                        f"{strat_metrics['年化波動度']*100:.2f}%",
+                        f"{strat_metrics['最大回撤 (MDD)']*100:.2f}%",
+                        f"{strat_metrics['波段交易勝率']*100:.2f}% ({strat_metrics['總交易次數']}次)",
+                        f"{strat_metrics['交易日勝率']*100:.2f}%",
+                    ],
+                    "Buy & Hold": [
+                        f"{bh_metrics['總報酬率']*100:.2f}%",
+                        f"{bh_metrics['年化報酬率']*100:.2f}%",
+                        f"{bh_metrics['年化波動度']*100:.2f}%",
+                        f"{bh_metrics['最大回撤 (MDD)']*100:.2f}%",
+                        "100.00% (1次)"
+                        if bh_metrics["總報酬率"] > 0
+                        else "0.00% (1次)",
+                        f"{bh_metrics['交易日勝率']*100:.2f}%",
+                    ],
+                },
+                index=[
+                    "總報酬率",
+                    "年化報酬率 (CAGR)",
+                    "年化波動度",
+                    "最大回撤 (MDD)",
+                    "波段交易勝率 (交易次數)",
+                    "持有日勝率",
                 ],
-                "Buy & Hold": [
-                    f"{bh_metrics['總報酬率']*100:.2f}%",
-                    f"{bh_metrics['年化報酬率']*100:.2f}%",
-                    f"{bh_metrics['年化波動度']*100:.2f}%",
-                    f"{bh_metrics['最大回撤 (MDD)']*100:.2f}%",
-                    "100.00% (1次)"
-                    if bh_metrics["總報酬率"] > 0
-                    else "0.00% (1次)",
-                    f"{bh_metrics['交易日勝率']*100:.2f}%",
-                ],
-            }, index=[
-                "總報酬率",
-                "年化報酬率 (CAGR)",
-                "年化波動度",
-                "最大回撤 (MDD)",
-                "波段交易勝率 (交易次數)",
-                "持有日勝率",
-            ])
+            )
 
             st.dataframe(metrics_df, use_container_width=True)
 
-            # 5. 繪製互動式圖表 (淨值走勢 + 盤勢背景標示 + Drawdown + 12M波動度)
+            # 5. 繪製互動式圖表
             st.subheader("📈 淨值走勢、回撤 (Drawdown) 與盤勢狀態分析")
 
             fig = make_subplots(
@@ -225,9 +255,9 @@ if ticker:
                 vertical_spacing=0.06,
                 row_heights=[0.5, 0.25, 0.25],
                 subplot_titles=(
-                    "累積淨值走勢圖 (背景色：淺藍=趨勢盤 / 淺橘=盤整盤)",
+                    f"累積淨值走勢圖 (背景色：淺藍=趨勢盤 / 淺橘=盤整盤 | 均線: {ma_window}日)",
                     "回撤走勢圖 (Drawdown %)",
-                    "12個月滾動年化波動度 (%)",
+                    f"{vol_window}日滾動年化波動度 (%)",
                 ),
             )
 
@@ -279,12 +309,12 @@ if ticker:
                 col=1,
             )
 
-            # 12個月波動度與門檻線
+            # 波動度與門檻線
             fig.add_trace(
                 go.Scatter(
                     x=df.index,
-                    y=df["Vol_12M"] * 100,
-                    name="12M 年化波動度",
+                    y=df["Vol"] * 100,
+                    name=f"{vol_window}日年化波動度",
                     line=dict(color="#9467bd", width=1.5),
                 ),
                 row=3,
@@ -300,7 +330,7 @@ if ticker:
                 col=1,
             )
 
-            # 標示趨勢盤與盤整盤區間 (使用連續區段合併以提升渲染效能)
+            # 標示趨勢盤與盤整盤區間
             df["Regime_Group"] = (
                 df["Is_Trend"] != df["Is_Trend"].shift()
             ).cumsum()
@@ -308,7 +338,6 @@ if ticker:
                 is_trend = group["Is_Trend"].iloc[0]
                 x0 = group.index[0]
                 x1 = group.index[-1]
-                # 趨勢盤：淡藍色；盤整盤：淡橘紅色
                 fill_color = (
                     "rgba(100, 181, 246, 0.18)"
                     if is_trend
