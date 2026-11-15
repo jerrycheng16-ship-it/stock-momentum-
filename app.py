@@ -51,7 +51,6 @@ def check_authentication():
     return False
 
 
-# 若未通過登入驗證，直接停止執行下方所有回測與介面程式碼
 if not check_authentication():
     st.stop()
 
@@ -145,7 +144,6 @@ def apply_preset_callback():
     st.session_state["consolidation_radio"] = cfg["consolidation_action"]
 
 
-# 初始化 Session State 預設值（初次載入套用美股指數模式）
 if "initialized" not in st.session_state:
     st.session_state["initialized"] = True
     st.session_state["preset_selector"] = "📈 美股指數模式 (SPY + ^VIX)"
@@ -154,7 +152,6 @@ if "initialized" not in st.session_state:
 
 # --- 側邊欄參數設定 ---
 with st.sidebar:
-    # 顯示登入狀態與登出按鈕
     user_col, logout_col = st.columns([2, 1])
     with user_col:
         st.caption(f"👤 已登入：`{st.session_state.get('current_user', '')}`")
@@ -520,6 +517,15 @@ def format_pos_label(pos_val):
         return "平倉空手 (0)"
 
 
+def format_target_badge(pos_val, ticker_symbol):
+    if pos_val == 1:
+        return f"➡️ {ticker_symbol.upper()} (買入做多 +1)"
+    elif pos_val == -1:
+        return f"🔻 {ticker_symbol.upper()} (反向做空 -1)"
+    else:
+        return "⏸️ 現金空手 (平倉部位 0)"
+
+
 # --- 主程式執行 ---
 if ticker:
     total_lookback = max(vol_window + extra_lookback, ma_window)
@@ -669,62 +675,112 @@ if ticker:
                 ) / df["BH_Equity"].cummax()
 
                 # ==========================================
-                # 最新即時訊號看板（訊號計算日 & 應用日）
+                # 最新兩期訊號與實戰執行時間軸（雙卡片樣式）
                 # ==========================================
-                latest_row = df.iloc[-1]
-                calc_date = df.index[-1]
-                calc_date_str = calc_date.strftime("%Y-%m-%d")
+                st.subheader("🎯 最新兩期訊號與實戰執行時間軸")
 
-                if is_monthly:
-                    next_period = calc_date.to_period("M") + 1
-                    apply_date_str = f"{next_period.year} 年 {next_period.month:02d} 月（次月首個交易日起）"
-                else:
-                    next_bday = calc_date + pd.tseries.offsets.BDay(1)
-                    apply_date_str = f"{next_bday.strftime('%Y-%m-%d')}（次一交易日）"
+                def build_period_card_html(
+                    row_series,
+                    calc_ts,
+                    card_title,
+                    action_label,
+                    bg_color,
+                    border_color,
+                    title_color,
+                ):
+                    calc_str = calc_ts.strftime("%Y-%m-%d")
+                    next_bday_str = (
+                        calc_ts + pd.tseries.offsets.BDay(1)
+                    ).strftime("%Y-%m-%d")
 
-                latest_sig_val = int(latest_row["Signal"])
-                latest_sig_label = format_pos_label(latest_sig_val)
-                latest_regime = (
-                    "趨勢盤 (均線濾網啟動)"
-                    if latest_row["Is_Trend"]
-                    else "盤整盤 (執行盤整規則)"
-                )
+                    if is_monthly:
+                        next_m = calc_ts.to_period("M") + 1
+                        apply_period_str = (
+                            f"{next_m.year}-{next_m.month:02d} 月份 ({next_bday_str} 起持有整月)"
+                        )
+                    else:
+                        apply_period_str = f"{next_bday_str} (次一交易日持有)"
 
-                st.subheader(
-                    f"🚦 {ticker.upper()} 最新即時交易訊號【{st.session_state['preset_selector']}】"
-                )
-                sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
+                    sig_val = int(row_series["Signal"])
+                    target_badge = format_target_badge(sig_val, ticker)
 
-                with sig_col1:
-                    st.metric(
-                        label="📅 訊號計算日（最新收盤）",
-                        value=calc_date_str,
-                        delta=f"收盤價: {latest_row['Close']:.2f} | {ma_window}{unit_label}線: {latest_row['MA']:.2f}",
-                        delta_color="off",
+                    close_val = row_series["Close"]
+                    ma_val = row_series["MA"]
+                    ma_comp = "大於均線 (>)" if close_val > ma_val else "跌破均線 (≤)"
+                    ma_unit_short = "M" if is_monthly else "D"
+
+                    # 依據波動度模式組裝環境描述文字
+                    vol_name_tag = (
+                        iv_ticker.upper() if use_external_iv else "HV"
                     )
-                with sig_col2:
-                    st.metric(
-                        label="⏭️ 訊號應用日（生效時間）",
-                        value=apply_date_str.split("（")[0],
-                        delta=apply_date_str.split("（")[1].rstrip("）"),
-                        delta_color="off",
+                    if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
+                        vol_detail = f"{vol_name_tag} = {row_series['Vol']*100:.2f}% vs 門檻 {vol_threshold*100:.1f}%"
+                    elif vol_mode == "2. 標準化波動度 (Z-Score) vs 門檻":
+                        vol_detail = f"{vol_name_tag} Z-Score = {row_series['Vol_Z']:.2f}σ vs 門檻 {z_threshold:.1f}σ"
+                    elif vol_mode == "3. 波動度與其均線交叉 (波動度均線)":
+                        vol_detail = f"{vol_name_tag} = {row_series['Vol']*100:.2f}% vs 均線 {row_series['Vol_MA']*100:.2f}%"
+                    else:
+                        vol_detail = (
+                            f"{vol_name_tag} Z = {row_series['Vol_Z']:.2f}σ "
+                            f"(均線 {row_series['Vol_Z_MA']:.2f}σ)"
+                        )
+
+                    if row_series["Is_Trend"]:
+                        regime_badge = f"🔥 趨勢盤 ({vol_detail})"
+                    else:
+                        regime_badge = f"🌊 盤整盤 ({vol_detail})"
+
+                    return f"""
+                    <div style="
+                        background-color: {bg_color};
+                        border: 1px solid {border_color};
+                        border-radius: 12px;
+                        padding: 20px 24px;
+                        height: 100%;
+                    ">
+                        <h3 style="color: {title_color}; margin-top: 0; margin-bottom: 16px; font-size: 1.25rem;">
+                            {card_title}
+                        </h3>
+                        <ul style="color: #E2E8F0; line-height: 1.9; font-size: 0.98rem; padding-left: 20px; margin-bottom: 0;">
+                            <li><strong>訊號發生／確認日</strong>：<code>{calc_str}</code></li>
+                            <li><strong>訊號適用期間</strong>：<code>{apply_period_str}</code></li>
+                            <li><strong>{action_label}</strong>：<strong>{target_badge}</strong></li>
+                            <li><strong>均線數值</strong>：<code>{ticker.upper()} = {close_val:.4f} vs {ma_window}{ma_unit_short} 均線 = {ma_val:.4f}</code> ({ma_comp})</li>
+                            <li><strong>波動環境</strong>：{regime_badge}</li>
+                        </ul>
+                    </div>
+                    """
+
+                card_col1, card_col2 = st.columns(2)
+
+                with card_col1:
+                    if len(df) >= 2:
+                        prev_row = df.iloc[-2]
+                        prev_ts = df.index[-2]
+                        prev_html = build_period_card_html(
+                            row_series=prev_row,
+                            calc_ts=prev_ts,
+                            card_title="📌 前一期已確認訊號（當期適用中）",
+                            action_label="實際執行標的",
+                            bg_color="#172033",
+                            border_color="#2A3954",
+                            title_color="#60A5FA",
+                        )
+                        st.markdown(prev_html, unsafe_allow_html=True)
+
+                with card_col2:
+                    curr_row = df.iloc[-1]
+                    curr_ts = df.index[-1]
+                    curr_html = build_period_card_html(
+                        row_series=curr_row,
+                        calc_ts=curr_ts,
+                        card_title="🆕 最新一期訊號（下期即將生效）",
+                        action_label="建議配置標的",
+                        bg_color="#0F291E",
+                        border_color="#1E4D38",
+                        title_color="#4ADE80",
                     )
-                with sig_col3:
-                    st.metric(
-                        label="🌊 最新判定盤勢",
-                        value="趨勢盤" if latest_row["Is_Trend"] else "盤整盤",
-                        delta=latest_regime,
-                        delta_color="off",
-                    )
-                with sig_col4:
-                    st.metric(
-                        label="🎯 最新目標部位（應用日執行）",
-                        value=latest_sig_label,
-                        delta=f"前期實際持有: {format_pos_label(int(latest_row['Position']))}",
-                        delta_color="normal"
-                        if latest_sig_val == 1
-                        else ("inverse" if latest_sig_val == -1 else "off"),
-                    )
+                    st.markdown(curr_html, unsafe_allow_html=True)
 
                 st.markdown("---")
 
@@ -939,261 +995,4 @@ if ticker:
                         x=df.index,
                         y=df["BH_DD"] * 100,
                         name="Buy & Hold Drawdown",
-                        line=dict(color="#F43F5E", width=1.6),
-                    ),
-                    row=3,
-                    col=1,
-                )
-
-                # --- Row 4: 依據模式繪製對應的波動度指標 ---
-                if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df.index,
-                            y=df["Vol"] * 100,
-                            name=vol_chart_name,
-                            line=dict(color="#C084FC", width=2.0),
-                        ),
-                        row=4,
-                        col=1,
-                    )
-                    fig.add_hline(
-                        y=vol_threshold * 100,
-                        line_dash="dash",
-                        line_color="#F43F5E",
-                        annotation_text=f"門檻 ({vol_threshold*100:.1f}%)",
-                        row=4,
-                        col=1,
-                    )
-
-                elif vol_mode == "2. 標準化波動度 (Z-Score) vs 門檻":
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df.index,
-                            y=df["Vol_Z"],
-                            name="標準化波動度 (Z-Score)",
-                            line=dict(color="#C084FC", width=2.0),
-                        ),
-                        row=4,
-                        col=1,
-                    )
-                    fig.add_hline(
-                        y=z_threshold,
-                        line_dash="dash",
-                        line_color="#F43F5E",
-                        annotation_text=f"門檻 ({z_threshold:.1f}σ)",
-                        row=4,
-                        col=1,
-                    )
-                    fig.add_hline(
-                        y=0,
-                        line_dash="dot",
-                        line_color="#94A3B8",
-                        opacity=0.6,
-                        row=4,
-                        col=1,
-                    )
-
-                elif vol_mode == "3. 波動度與其均線交叉 (波動度均線)":
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df.index,
-                            y=df["Vol"] * 100,
-                            name=vol_chart_name,
-                            line=dict(color="#C084FC", width=2.0),
-                        ),
-                        row=4,
-                        col=1,
-                    )
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df.index,
-                            y=df["Vol_MA"] * 100,
-                            name=f"波動度{vol_ma_window}{unit_label}均線",
-                            line=dict(color="#FACC15", width=1.8, dash="dash"),
-                        ),
-                        row=4,
-                        col=1,
-                    )
-
-                else:  # 4. 標準化波動度 + 均線交叉雙重過濾
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df.index,
-                            y=df["Vol_Z"],
-                            name="標準化波動度 (Z-Score)",
-                            line=dict(color="#C084FC", width=2.0),
-                        ),
-                        row=4,
-                        col=1,
-                    )
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df.index,
-                            y=df["Vol_Z_MA"],
-                            name=f"標準化波動度{z_ma_window}{unit_label}均線",
-                            line=dict(color="#FACC15", width=1.8, dash="dash"),
-                        ),
-                        row=4,
-                        col=1,
-                    )
-                    fig.add_hline(
-                        y=z_high_thresh,
-                        line_dash="dot",
-                        line_color="#F43F5E",
-                        annotation_text=f"高檔 ({z_high_thresh:.1f}σ)",
-                        row=4,
-                        col=1,
-                    )
-                    fig.add_hline(
-                        y=z_low_thresh,
-                        line_dash="dot",
-                        line_color="#22C55E",
-                        annotation_text=f"低檔 ({z_low_thresh:.1f}σ)",
-                        row=4,
-                        col=1,
-                    )
-
-                # 標示趨勢盤與盤整盤區間（無縫銜接）
-                df["Regime_Group"] = (
-                    df["Is_Trend"] != df["Is_Trend"].shift()
-                ).cumsum()
-                groups = list(df.groupby("Regime_Group"))
-
-                for i, (_, group) in enumerate(groups):
-                    is_trend = group["Is_Trend"].iloc[0]
-                    x0 = group.index[0]
-                    x1 = (
-                        groups[i + 1][1].index[0]
-                        if i + 1 < len(groups)
-                        else group.index[-1]
-                    )
-
-                    fill_color = (
-                        "rgba(56, 189, 248, 0.16)"
-                        if is_trend
-                        else "rgba(251, 146, 60, 0.14)"
-                    )
-
-                    for r in [1, 2]:
-                        fig.add_vrect(
-                            x0=x0,
-                            x1=x1,
-                            fillcolor=fill_color,
-                            layer="below",
-                            line_width=0,
-                            row=r,
-                            col=1,
-                        )
-
-                # 圖表版面配置
-                fig.update_layout(
-                    height=1120,
-                    hovermode="x unified",
-                    legend=dict(
-                        orientation="h",
-                        yanchor="bottom",
-                        y=1.04,
-                        xanchor="left",
-                        x=0,
-                    ),
-                    margin=dict(l=20, r=20, t=120, b=20),
-                )
-                fig.update_yaxes(title_text="價格", row=1, col=1)
-                fig.update_yaxes(title_text="淨值 (倍數)", row=2, col=1)
-                fig.update_yaxes(title_text="回撤 (%)", row=3, col=1)
-                fig.update_yaxes(title_text=vol_y_title, row=4, col=1)
-
-                st.plotly_chart(fig, use_container_width=True)
-
-                # 7. 盤勢與倉位狀態統計摘要
-                trend_pct = df["Is_Trend"].mean() * 100
-                long_pct = (df["Position"] == 1).mean() * 100
-                flat_pct = (df["Position"] == 0).mean() * 100
-                short_pct = (df["Position"] == -1).mean() * 100
-
-                st.info(
-                    f"💡 **區間與倉位統計（{timeframe}）**：回測期間內**趨勢盤**佔比 `{trend_pct:.1f}%`、**盤整盤**佔比 `{100-trend_pct:.1f}%`｜"
-                    f"倉位時間分佈：**做多** `{long_pct:.1f}%`、**空手** `{flat_pct:.1f}%`、**做空** `{short_pct:.1f}%`。"
-                )
-
-                # ==========================================
-                # 月線逐月計算過程明細表（訊號驗證視角，僅月線模式顯示）
-                # ==========================================
-                if is_monthly:
-                    st.markdown("---")
-                    st.subheader("📋 月線逐月計算過程與應用報酬驗證表（由新到舊排列）")
-                    st.caption(
-                        "說明：每一列為「訊號計算日」當月底收盤計算出的指標與訊號，右側對應欄位直接顯示該訊號在「訊號應用月份（次月）」實際執行的部位與結算報酬。"
-                    )
-
-                    apply_months = (df.index.to_period("M") + 1).astype(str)
-
-                    next_bh_ret = df["BH_Ret"].shift(-1)
-                    next_strat_ret = df["Strat_Ret"].shift(-1)
-                    next_strat_eq = df["Strat_Equity"].shift(-1)
-
-                    table_data = {
-                        "訊號計算日": df.index.strftime("%Y-%m-%d"),
-                        "月底收盤價": df["Close"].map(lambda x: f"{x:.2f}"),
-                        f"價格{ma_window}月均線": df["MA"].map(
-                            lambda x: f"{x:.2f}"
-                        ),
-                        "均線狀態": np.where(
-                            df["Close"] > df["MA"], "站上均線", "跌破均線"
-                        ),
-                        "波動度 (%)": df["Vol"].map(
-                            lambda x: f"{x*100:.2f}%"
-                        ),
-                    }
-
-                    if "Vol_Z" in df.columns:
-                        table_data["標準化波動度 (Z-Score)"] = df["Vol_Z"].map(
-                            lambda x: f"{x:.2f}σ"
-                        )
-                    if "Vol_Z_MA" in df.columns:
-                        table_data[f"Z-Score {z_ma_window}月均線"] = df[
-                            "Vol_Z_MA"
-                        ].map(lambda x: f"{x:.2f}σ")
-                    if "Vol_MA" in df.columns:
-                        table_data[f"波動度{vol_ma_window}月均線 (%)"] = df[
-                            "Vol_MA"
-                        ].map(lambda x: f"{x*100:.2f}%")
-
-                    table_data.update(
-                        {
-                            "判定盤勢": np.where(
-                                df["Is_Trend"], "趨勢盤", "盤整盤"
-                            ),
-                            "訊號應用月份": apply_months,
-                            "應用月份執行部位": df["Signal"].map(
-                                lambda x: format_pos_label(int(x))
-                            ),
-                            "應用月份標的報酬": next_bh_ret.map(
-                                lambda x: f"{x*100:+.2f}%"
-                                if pd.notna(x)
-                                else "待次月結算"
-                            ),
-                            "應用月份策略報酬": next_strat_ret.map(
-                                lambda x: f"{x*100:+.2f}%"
-                                if pd.notna(x)
-                                else "待次月結算"
-                            ),
-                            "應用月底策略淨值": next_strat_eq.map(
-                                lambda x: f"{x:.3f}"
-                                if pd.notna(x)
-                                else "待次月結算"
-                            ),
-                        }
-                    )
-
-                    monthly_detail_df = pd.DataFrame(table_data)
-                    monthly_detail_df = monthly_detail_df.iloc[::-1].reset_index(
-                        drop=True
-                    )
-
-                    st.dataframe(
-                        monthly_detail_df,
-                        use_container_width=True,
-                        height=500,
-                    )
+                        line=
