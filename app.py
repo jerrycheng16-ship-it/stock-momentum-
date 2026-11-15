@@ -10,12 +10,27 @@ import yfinance as yf
 st.set_page_config(page_title="波動度濾網與均線策略回測", layout="wide")
 st.title("📈 波動度狀態切換 × 均線策略回測系統")
 
+# 內建常用隱含波動度指數清單
+IV_OPTIONS = {
+    "^VIX (S&P 500 恐慌指數 - 美股大盤)": "^VIX",
+    "^VXN (Nasdaq 100 波動率 - 科技/半導體)": "^VXN",
+    "^RVX (Russell 2000 波動率 - 中小型股)": "^RVX",
+    "^VXD (道瓊工業波動率 - 藍籌傳產)": "^VXD",
+    "^VVIX (VIX 的波動率 - 尾部風險預警)": "^VVIX",
+    "^VXAPL (Apple 蘋果隱含波動率)": "^VXAPL",
+    "^VXAZN (Amazon 亞馬遜隱含波動率)": "^VXAZN",
+    "^VXGOG (Google 隱含波動率)": "^VXGOG",
+    "^OVX (原油波動率指數 - 能源/通膨)": "^OVX",
+    "^GVZ (黃金波動率指數 - 避險貴金屬)": "^GVZ",
+    "自訂輸入代號...": "CUSTOM",
+}
+
 # --- 側邊欄參數設定 ---
 with st.sidebar:
     st.header("⚙️ 策略參數設定")
     ticker = st.text_input(
         "輸入交易標的代號 (股票或 ETF)",
-        value="0050.TW",
+        value="SPY",
         help="台股請加 .TW 或 .TWO (例如: 0050.TW, 2330.TW)，美股直接輸入 (例如: SPY, QQQ, SMH)",
     )
 
@@ -25,23 +40,28 @@ with st.sidebar:
             "標的自身歷史波動度 (HV)",
             "外部隱含波動度指數 (IV Index)",
         ],
-        index=0,
-        help="HV：依據標的自身過去漲跌幅計算；IV Index：抓取市場恐慌/隱含波動率指數（如 ^VIX）作為領先情緒濾網。",
+        index=1,  # 預設為外部隱含波動度指數 (IV Index)
+        help="HV：依據標的自身過去漲跌幅計算；IV Index：抓取市場恐慌/隱含波動率指數作為領先情緒濾網。",
     )
     use_external_iv = vol_source == "外部隱含波動度指數 (IV Index)"
 
     iv_ticker = "^VIX"
     if use_external_iv:
-        iv_ticker = st.text_input(
-            "輸入隱含波動度指數代號",
-            value="^VIX",
-            help="常用代號：^VIX (S&P500)、^VXN (Nasdaq100/科技股)、^RVX (羅素2000)、^VXAPL (蘋果)、^OVX (原油)",
+        selected_iv_label = st.selectbox(
+            "選擇隱含波動度指數",
+            options=list(IV_OPTIONS.keys()),
+            index=0,  # 預設為 ^VIX
+            help="直接從下拉選單選擇對應市場的 30 天期隱含波動率指數，無需手動輸入。",
         )
+        if IV_OPTIONS[selected_iv_label] == "CUSTOM":
+            iv_ticker = st.text_input("請輸入自訂波動率指數代號", value="^VIX")
+        else:
+            iv_ticker = IV_OPTIONS[selected_iv_label]
 
     timeframe = st.radio(
         "資料頻率（觀察週期）",
         options=["日線 (Daily)", "月線 (Monthly)"],
-        index=0,
+        index=1,  # 預設為月線 (Monthly)
         horizontal=True,
         help="日線：每日收盤計算指標，次日執行；月線：每月最後交易日收盤計算指標，次月執行。",
     )
@@ -51,7 +71,7 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("開始日期", value=datetime(2015, 1, 1))
+        start_date = st.date_input("開始日期", value=datetime(2006, 1, 1))
     with col2:
         end_date = st.date_input("結束日期", value=datetime.today())
 
@@ -59,7 +79,8 @@ with st.sidebar:
     st.subheader(f"📐 指標週期設定（單位：{unit_label}）")
 
     default_vol_win = 12 if is_monthly else 252
-    default_ma_win = 3 if is_monthly else 63
+    # 月線預設 6 個月均線，日線預設 126 日均線（半年線）
+    default_ma_win = 6 if is_monthly else 126
 
     if not use_external_iv:
         vol_window = st.number_input(
@@ -72,7 +93,7 @@ with st.sidebar:
         )
     else:
         vol_window = 0
-        st.caption(
+        st.info(
             f"ℹ️ 目前直接採用 `{iv_ticker.upper()}` 的收盤數值作為當期年化隱含波動度 (%)。"
         )
 
@@ -82,7 +103,7 @@ with st.sidebar:
         max_value=60 if is_monthly else 500,
         value=default_ma_win,
         step=1,
-        help=f"目前為{timeframe}模式：預設 {default_ma_win} {unit_label}（約 3 個月季線）。",
+        help=f"目前為{timeframe}模式：預設 {default_ma_win} {unit_label}（半年線）。",
     )
 
     st.markdown("---")
@@ -96,11 +117,13 @@ with st.sidebar:
             "3. 波動度與其均線交叉 (波動度均線)",
             "4. 標準化波動度 + 均線交叉雙重過濾 (高低檔位觸發)",
         ],
-        index=0,
+        index=3,  # 預設為模式 4：標準化波動度 + 均線交叉雙重過濾
         help="模式 4 結合標準化波動度高低檔位與均線突破/跌破，採用狀態記憶機制避免頻繁切換。",
     )
 
-    vol_label_prefix = f"{iv_ticker.upper()} 隱含波動度" if use_external_iv else "歷史波動度"
+    vol_label_prefix = (
+        f"{iv_ticker.upper()} 隱含波動度" if use_external_iv else "歷史波動度"
+    )
     extra_lookback = 0
 
     if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
@@ -221,7 +244,7 @@ with st.sidebar:
                 "低檔上穿均線 → 趨勢盤｜高檔下破均線 → 盤整盤",
                 "高檔下破均線 → 趨勢盤｜低檔上穿均線 → 盤整盤",
             ],
-            index=0,
+            index=1,  # 預設為：高檔下破均線 → 趨勢盤｜低檔上穿均線 → 盤整盤
         )
         is_low_cross_up_trend = (
             dual_direction
@@ -370,7 +393,6 @@ if ticker:
                 )
                 iv_load_failed = True
             else:
-                # 外部 VIX 類指數報價為百分比（如 20.5 代表 20.5%），除以 100 轉為小數並對齊日期（前值填補跨市場休市日）
                 iv_series = (iv_raw["Close"] / 100.0).reindex(df.index).ffill()
                 df["Vol"] = iv_series
         else:
