@@ -46,24 +46,48 @@ with st.sidebar:
         help="預設 63 個交易日（約 3 個月季線），20 天約為月線，200 天為年線。",
     )
 
+    trend_condition = st.radio(
+        "趨勢盤判斷條件（啟用均線濾網的時機）",
+        options=[
+            "波動度「低於 (<)」門檻為趨勢盤",
+            "波動度「高於 (>)」門檻為趨勢盤",
+        ],
+        index=0,
+        help="趨勢盤時會依據均線操作；盤整盤時則無條件維持做多持有。",
+    )
+    is_low_vol_trend = trend_condition == "波動度「低於 (<)」門檻為趨勢盤"
+    op_symbol = "<" if is_low_vol_trend else ">"
+    opposite_symbol = ">=" if is_low_vol_trend else "<="
+
     vol_threshold = (
         st.slider(
-            "趨勢盤波動度門檻 (%)",
+            "波動度門檻 (%)",
             min_value=5.0,
             max_value=60.0,
             value=20.0,
             step=0.5,
-            help="當波動度小於此數值時，判定為趨勢盤（啟用均線停損）；大於等於此數值則為盤整盤（維持買入）。",
         )
         / 100.0
     )
+
+    breakdown_action = st.radio(
+        "趨勢盤跌破均線時的動作",
+        options=[
+            "平倉空手 (部位 = 0)",
+            "反向做空 (部位 = -1)",
+        ],
+        index=0,
+        help="平倉空手：跌破均線時持有現金（報酬 0%）；反向做空：跌破均線時放空標的（股價下跌時獲利）。",
+    )
+    short_on_breakdown = breakdown_action == "反向做空 (部位 = -1)"
+    breakdown_text = "反向做空" if short_on_breakdown else "平倉賣出"
 
     st.markdown("---")
     st.markdown(f"""
     **目前交易邏輯：**
     * **波動度計算**：過去 `{vol_window}` 個交易日之年化波動度。
-    * **趨勢盤 (`波動度 < {vol_threshold*100:.1f}%`)**：股價 > `{ma_window}` 日均線買入，跌破賣出。
-    * **盤整盤 (`波動度 >= {vol_threshold*100:.1f}%`)**：維持買入持有。
+    * **趨勢盤 (`波動度 {op_symbol} {vol_threshold*100:.1f}%`)**：股價 > `{ma_window}` 日均線買入，跌破則**{breakdown_text}**。
+    * **盤整盤 (`波動度 {opposite_symbol} {vol_threshold*100:.1f}%`)**：維持買入持有（做多）。
     * **執行延遲**：當日收盤確認訊號，次一交易日生效。
     """)
 
@@ -71,19 +95,17 @@ with st.sidebar:
 # --- 數據獲取與快取 ---
 @st.cache_data(ttl=3600)
 def load_data(symbol, start, end, lookback_days):
-    # 根據使用者設定的最大天數，動態換算日曆天數往前多抓資料（乘以 1.6 涵蓋假日與休市）
     buffer_calendar_days = int(lookback_days * 1.6) + 30
     fetch_start = start - timedelta(days=buffer_calendar_days)
     df = yf.download(symbol, start=fetch_start, end=end, progress=False)
     if df.empty:
         return df
-    # 處理 yfinance 可能回傳 MultiIndex 的問題
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
 
 
-# --- 績效指標計算函數 ---
+# --- 績效指標計算函數（支援多頭、空手與反向做空波段計算） ---
 def calculate_metrics(returns_series, position_series=None):
     cum_returns = (1 + returns_series).cumprod()
     total_return = cum_returns.iloc[-1] - 1
@@ -101,39 +123,21 @@ def calculate_metrics(returns_series, position_series=None):
 
     # 勝率計算
     if position_series is not None:
-        active_days = returns_series[position_series > 0]
+        # 持有部位（做多或做空）期間的日勝率
+        active_days = returns_series[position_series != 0]
         daily_win_rate = (
             (active_days > 0).mean() if len(active_days) > 0 else 0.0
         )
 
-        # 計算單筆波段交易勝率
-        pos_diff = position_series.diff().fillna(0)
-        entries = position_series[
-            (pos_diff == 1)
-            | (
-                (position_series == 1)
-                & (position_series.index == position_series.index[0])
-            )
-        ].index
-        exits = position_series[pos_diff == -1].index
-
+        # 依照連續相同部位（+1 多單波段 / -1 空單波段）切分每一筆完整交易
+        trade_groups = (position_series != position_series.shift()).cumsum()
         trade_returns = []
-        for entry_date in entries:
-            future_exits = exits[exits > entry_date]
-            if len(future_exits) > 0:
-                exit_date = future_exits[0]
-                t_ret = (
-                    cum_returns.loc[exit_date]
-                    / cum_returns.loc[entry_date]
-                    * (1 + returns_series.loc[entry_date])
-                ) - 1
-            else:
-                t_ret = (
-                    cum_returns.iloc[-1]
-                    / cum_returns.loc[entry_date]
-                    * (1 + returns_series.loc[entry_date])
-                ) - 1
-            trade_returns.append(t_ret)
+        for _, grp_pos in position_series.groupby(trade_groups):
+            pos_val = grp_pos.iloc[0]
+            if pos_val != 0:
+                grp_ret = returns_series.loc[grp_pos.index]
+                t_ret = (1 + grp_ret).prod() - 1
+                trade_returns.append(t_ret)
 
         trade_win_rate = (
             np.mean([r > 0 for r in trade_returns])
@@ -178,12 +182,18 @@ if ticker:
         if len(df) < 10:
             st.warning("有效回測資料過少，請將開始日期往前調整，或縮短指標計算天數。")
         else:
-            # 2. 判斷盤勢與訊號
-            df["Is_Trend"] = df["Vol"] < vol_threshold
+            # 2. 依據使用者選擇的方向判斷趨勢盤
+            if is_low_vol_trend:
+                df["Is_Trend"] = df["Vol"] < vol_threshold
+            else:
+                df["Is_Trend"] = df["Vol"] > vol_threshold
 
-            # 訊號邏輯：趨勢盤看均線 (Close > MA -> 1 else 0)，盤整盤維持買入 (1)
+            # 跌破均線時的目標部位：空手為 0，做空為 -1
+            below_ma_pos = -1 if short_on_breakdown else 0
+
+            # 訊號邏輯：趨勢盤看均線 (Close > MA -> 1 else below_ma_pos)，盤整盤維持買入 (1)
             df["Signal"] = np.where(
-                df["Is_Trend"], np.where(df["Close"] > df["MA"], 1, 0), 1
+                df["Is_Trend"], np.where(df["Close"] > df["MA"], 1, below_ma_pos), 1
             )
 
             # 實際部位：昨日收盤確認訊號，今日持有 (避免前視偏誤)
@@ -209,7 +219,7 @@ if ticker:
             bh_metrics = calculate_metrics(df["BH_Ret"], None)
 
             st.subheader(
-                f"📊 {ticker.upper()} 績效指標比較 ({vol_window}日波動度 / {ma_window}日均線)"
+                f"📊 {ticker.upper()} 績效指標比較 (波動度 {op_symbol} {vol_threshold*100:.1f}% 為趨勢盤｜跌破均線：{breakdown_text})"
             )
 
             metrics_df = pd.DataFrame(
@@ -239,7 +249,7 @@ if ticker:
                     "年化波動度",
                     "最大回撤 (MDD)",
                     "波段交易勝率 (交易次數)",
-                    "持有日勝率",
+                    "持倉日勝率",
                 ],
             )
 
@@ -255,7 +265,7 @@ if ticker:
                 vertical_spacing=0.06,
                 row_heights=[0.5, 0.25, 0.25],
                 subplot_titles=(
-                    f"累積淨值走勢圖 (背景色：淺藍=趨勢盤 / 淺橘=盤整盤 | 均線: {ma_window}日)",
+                    f"累積淨值走勢圖 (背景色：淺藍=趨勢盤 [波動度{op_symbol}{vol_threshold*100:.1f}%] / 淺橘=盤整盤)",
                     "回撤走勢圖 (Drawdown %)",
                     f"{vol_window}日滾動年化波動度 (%)",
                 ),
@@ -330,7 +340,7 @@ if ticker:
                 col=1,
             )
 
-            # 標示趨勢盤與盤整盤區間
+            # 標示趨勢盤與盤整盤區間（顏色定義維持一致：淺藍=趨勢盤、淺橘=盤整盤）
             df["Regime_Group"] = (
                 df["Is_Trend"] != df["Is_Trend"].shift()
             ).cumsum()
@@ -373,9 +383,13 @@ if ticker:
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # 6. 盤勢統計摘要
+            # 6. 盤勢與倉位狀態統計摘要
             trend_pct = df["Is_Trend"].mean() * 100
-            hold_pct = df["Position"].mean() * 100
+            long_pct = (df["Position"] == 1).mean() * 100
+            flat_pct = (df["Position"] == 0).mean() * 100
+            short_pct = (df["Position"] == -1).mean() * 100
+
             st.info(
-                f"💡 **區間狀態統計**：回測期間內，**趨勢盤**佔比為 `{trend_pct:.1f}%`，**盤整盤**佔比為 `{100-trend_pct:.1f}%`；策略整體持股時間比例為 `{hold_pct:.1f}%`。"
+                f"💡 **區間與倉位統計**：回測期間內**趨勢盤**佔比 `{trend_pct:.1f}%`、**盤整盤**佔比 `{100-trend_pct:.1f}%`｜"
+                f"倉位時間分佈：**做多** `{long_pct:.1f}%`、**空手** `{flat_pct:.1f}%`、**做空** `{short_pct:.1f}%`。"
             )
