@@ -421,3 +421,126 @@ if ticker:
                 )
 
             # --- Row 2: 淨值曲線 ---
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["Strat_Equity"],
+                    name="波動度濾網策略",
+                    line=dict(color="#1f77b4", width=2.2),
+                ),
+                row=2,
+                col=1,
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["BH_Equity"],
+                    name="Buy & Hold",
+                    line=dict(color="#7f7f7f", width=1.8, dash="dot"),
+                ),
+                row=2,
+                col=1,
+            )
+
+            # --- Row 3: Drawdown 曲線 ---
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["Strat_DD"] * 100,
+                    name="策略 Drawdown",
+                    fill="tozeroy",
+                    line=dict(color="#1f77b4", width=1.2),
+                    fillcolor="rgba(31, 119, 180, 0.2)",
+                ),
+                row=3,
+                col=1,
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["BH_DD"] * 100,
+                    name="Buy & Hold Drawdown",
+                    line=dict(color="#d62728", width=1.2),
+                ),
+                row=3,
+                col=1,
+            )
+
+            # --- Row 4: 波動度與門檻線 ---
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["Vol"] * 100,
+                    name=f"{vol_window}{unit_label}年化波動度",
+                    line=dict(color="#9467bd", width=1.5),
+                ),
+                row=4,
+                col=1,
+            )
+
+            fig.add_hline(
+                y=vol_threshold * 100,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"門檻 ({vol_threshold*100:.1f}%)",
+                row=4,
+                col=1,
+            )
+
+            # 標示趨勢盤與盤整盤區間
+            df["Regime_Group"] = (
+                df["Is_Trend"] != df["Is_Trend"].shift()
+            ).cumsum()
+            for _, group in df.groupby("Regime_Group"):
+                is_trend = group["Is_Trend"].iloc[0]
+                x0 = group.index[0]
+                x1 = group.index[-1]
+                fill_color = (
+                    "rgba(100, 181, 246, 0.18)"
+                    if is_trend
+                    else "rgba(255, 167, 38, 0.18)"
+                )
+
+                for r in [1, 2]:
+                    fig.add_vrect(
+                        x0=x0,
+                        x1=x1,
+                        fillcolor=fill_color,
+                        layer="below",
+                        line_width=0,
+                        row=r,
+                        col=1,
+                    )
+
+            # 圖表版面配置
+            fig.update_layout(
+                height=1050,
+                hovermode="x unified",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.01,
+                    xanchor="right",
+                    x=1,
+                ),
+                margin=dict(l=20, r=20, t=70, b=20),
+            )
+            fig.update_yaxes(title_text="價格", row=1, col=1)
+            fig.update_yaxes(title_text="淨值 (倍數)", row=2, col=1)
+            fig.update_yaxes(title_text="回撤 (%)", row=3, col=1)
+            fig.update_yaxes(title_text="波動度 (%)", row=4, col=1)
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 6. 盤勢與倉位狀態統計摘要
+            trend_pct = df["Is_Trend"].mean() * 100
+            long_pct = (df["Position"] == 1).mean() * 100
+            flat_pct = (df["Position"] == 0).mean() * 100
+            short_pct = (df["Position"] == -1).mean() * 100
+
+            st.info(
+                f"💡 **區間與倉位統計（{timeframe}）**：回測期間內**趨勢盤**佔比 `{trend_pct:.1f}%`、**盤整盤**佔比 `{100-trend_pct:.1f}%`｜"
+                f"倉位時間分佈：**做多** `{long_pct:.1f}%`、**空手** `{flat_pct:.1f}%`、**做空** `{short_pct:.1f}%`。"
+            )
