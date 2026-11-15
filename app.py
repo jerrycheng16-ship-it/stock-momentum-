@@ -37,9 +37,8 @@ with st.sidebar:
         end_date = st.date_input("結束日期", value=datetime.today())
 
     st.markdown("---")
-    st.subheader(f"📐 指標週期與門檻設定（單位：{unit_label}）")
+    st.subheader(f"📐 指標週期設定（單位：{unit_label}）")
 
-    # 切換日線/月線時，自動給予對應的預設期數（12個月 & 3個月）
     default_vol_win = 12 if is_monthly else 252
     default_ma_win = 3 if is_monthly else 63
 
@@ -53,7 +52,7 @@ with st.sidebar:
     )
 
     ma_window = st.number_input(
-        f"均線計算週期 ({unit_label})",
+        f"價格均線週期 ({unit_label})",
         min_value=2,
         max_value=60 if is_monthly else 500,
         value=default_ma_win,
@@ -61,35 +60,107 @@ with st.sidebar:
         help=f"目前為{timeframe}模式：預設 {default_ma_win} {unit_label}（約 3 個月季線）。",
     )
 
-    trend_condition = st.radio(
-        "趨勢盤判斷條件（啟用均線濾網的時機）",
+    st.markdown("---")
+    st.subheader("🌊 波動度狀態（趨勢盤）判斷模式")
+
+    vol_mode = st.selectbox(
+        "選擇波動度判斷方法",
         options=[
-            "波動度「低於 (<)」門檻為趨勢盤",
-            "波動度「高於 (>)」門檻為趨勢盤",
+            "1. 原始波動度 (%) vs 固定門檻",
+            "2. 標準化波動度 (Z-Score) vs 門檻",
+            "3. 波動度與其均線交叉 (波動度均線)",
         ],
         index=0,
-        help="趨勢盤時會依據均線操作；盤整盤時則依據下方設定的盤整盤規則執行。",
+        help="標準化波動度可消除不同個股天生波動率高低的差異；波動度均線交叉則觀察波動度本身的趨勢變化。",
     )
-    is_low_vol_trend = trend_condition == "波動度「低於 (<)」門檻為趨勢盤"
-    op_symbol = "<" if is_low_vol_trend else ">"
-    opposite_symbol = ">=" if is_low_vol_trend else "<="
 
-    vol_threshold = (
-        st.slider(
-            "波動度門檻 (%)",
-            min_value=5.0,
-            max_value=60.0,
-            value=20.0,
-            step=0.5,
+    # 根據選擇的模式動態顯示對應參數
+    extra_lookback = 0
+    if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
+        trend_condition = st.radio(
+            "趨勢盤判斷條件",
+            options=[
+                "波動度「低於 (<)」門檻為趨勢盤",
+                "波動度「高於 (>)」門檻為趨勢盤",
+            ],
+            index=0,
         )
-        / 100.0
-    )
+        is_low_vol_trend = trend_condition == "波動度「低於 (<)」門檻為趨勢盤"
+        vol_threshold = (
+            st.slider(
+                "年化波動度門檻 (%)",
+                min_value=5.0,
+                max_value=80.0,
+                value=20.0,
+                step=0.5,
+            )
+            / 100.0
+        )
+        op_symbol = "<" if is_low_vol_trend else ">"
+        regime_desc = f"原始波動度 {op_symbol} {vol_threshold*100:.1f}%"
+
+    elif vol_mode == "2. 標準化波動度 (Z-Score) vs 門檻":
+        z_window = st.number_input(
+            f"標準化滾動基準週期 ({unit_label})",
+            min_value=5 if is_monthly else 20,
+            max_value=120 if is_monthly else 1000,
+            value=12 if is_monthly else 252,
+            step=1,
+            help="用來計算波動度平均值與標準差的滾動窗口，讓高波動股與低波動 ETF 站在同一基準比較。",
+        )
+        extra_lookback = z_window
+        trend_condition = st.radio(
+            "趨勢盤判斷條件",
+            options=[
+                "標準化波動度「低於 (<)」門檻為趨勢盤",
+                "標準化波動度「高於 (>)」門檻為趨勢盤",
+            ],
+            index=0,
+        )
+        is_low_vol_trend = (
+            trend_condition == "標準化波動度「低於 (<)」門檻為趨勢盤"
+        )
+        z_threshold = st.slider(
+            "標準化波動度門檻 (Z-Score 標準差倍數)",
+            min_value=-2.5,
+            max_value=2.5,
+            value=0.0,
+            step=0.1,
+            help="0.0 代表處於歷史平均水準；負值代表比平時平靜，正值代表比平時劇烈。",
+        )
+        op_symbol = "<" if is_low_vol_trend else ">"
+        regime_desc = f"標準化波動度 {op_symbol} {z_threshold:.1f}σ"
+
+    else:  # 3. 波動度與其均線交叉
+        vol_ma_window = st.number_input(
+            f"波動度均線週期 ({unit_label})",
+            min_value=2,
+            max_value=60 if is_monthly else 500,
+            value=3 if is_monthly else 63,
+            step=1,
+            help="計算波動度曲線本身的移動平均線，用來判斷波動度正在升溫還是降溫。",
+        )
+        extra_lookback = vol_ma_window
+        trend_condition = st.radio(
+            "趨勢盤判斷條件",
+            options=[
+                "波動度「上穿 (> 均線)」為趨勢盤",
+                "波動度「下破 (< 均線)」為趨勢盤",
+            ],
+            index=0,
+            help="上穿均線為趨勢盤：波動放大時啟動均線保護；下破均線為趨勢盤：波動收斂回穩時啟動均線保護。",
+        )
+        is_low_vol_trend = (
+            trend_condition == "波動度「下破 (< 均線)」為趨勢盤"
+        )
+        op_symbol = "<" if is_low_vol_trend else ">"
+        regime_desc = f"波動度 {op_symbol} 波動度{vol_ma_window}{unit_label}均線"
 
     st.markdown("---")
     st.subheader("🎯 盤勢動作設定")
 
     breakdown_action = st.radio(
-        "趨勢盤跌破均線時的動作",
+        "趨勢盤跌破價格均線時的動作",
         options=[
             "平倉空手 (部位 = 0)",
             "反向做空 (部位 = -1)",
@@ -104,7 +175,9 @@ with st.sidebar:
         "盤整盤時的交易動作",
         options=[
             "維持買入部位 (部位 = +1)",
-            "維持前一日部位 (不動作)" if not is_monthly else "維持前一月部位 (不動作)",
+            "維持前一日部位 (不動作)"
+            if not is_monthly
+            else "維持前一月部位 (不動作)",
             "全部平倉空手 (部位 = 0)",
         ],
         index=0,
@@ -115,9 +188,8 @@ with st.sidebar:
     exec_delay_text = "次月" if is_monthly else "次一交易日"
     st.markdown(f"""
     **目前交易邏輯（{timeframe}）：**
-    * **波動度計算**：過去 `{vol_window}` 個{unit_label}之年化波動度。
-    * **趨勢盤 (`波動度 {op_symbol} {vol_threshold*100:.1f}%`)**：收盤價 > `{ma_window}` {unit_label}均線買入 (`+1`)，跌破則**{breakdown_text}**。
-    * **盤整盤 (`波動度 {opposite_symbol} {vol_threshold*100:.1f}%`)**：**{consolidation_action}**。
+    * **趨勢盤 (`{regime_desc}`)**：收盤價 > `{ma_window}` {unit_label}均線買入 (`+1`)，跌破則**{breakdown_text}**。
+    * **盤整盤（非趨勢盤時）**：**{consolidation_action}**。
     * **執行延遲**：當期收盤確認訊號，**{exec_delay_text}**生效。
     """)
 
@@ -125,7 +197,6 @@ with st.sidebar:
 # --- 數據獲取與快取 ---
 @st.cache_data(ttl=3600)
 def load_data(symbol, start, end, lookback_periods, monthly_mode):
-    # 根據日線或月線模式，換算足夠的日曆天數往前預抓歷史資料
     if monthly_mode:
         buffer_calendar_days = int(lookback_periods * 32) + 90
     else:
@@ -139,7 +210,6 @@ def load_data(symbol, start, end, lookback_periods, monthly_mode):
         df.columns = df.columns.get_level_values(0)
 
     if monthly_mode:
-        # 轉換為每月最後一個交易日的收盤價
         try:
             df = df.resample("ME").last()
         except ValueError:
@@ -160,19 +230,16 @@ def calculate_metrics(returns_series, position_series=None, ann_factor=252):
 
     ann_vol = returns_series.std() * np.sqrt(ann_factor)
 
-    # 計算回撤
     rolling_max = cum_returns.cummax()
     drawdown = (cum_returns - rolling_max) / rolling_max
     max_dd = drawdown.min()
 
-    # 勝率計算
     if position_series is not None:
         active_periods = returns_series[position_series != 0]
         period_win_rate = (
             (active_periods > 0).mean() if len(active_periods) > 0 else 0.0
         )
 
-        # 依照連續相同部位（+1 多單波段 / -1 空單波段）切分每一筆完整交易
         trade_groups = (position_series != position_series.shift()).cumsum()
         trade_returns = []
         for _, grp_pos in position_series.groupby(trade_groups):
@@ -206,8 +273,9 @@ def calculate_metrics(returns_series, position_series=None, ann_factor=252):
 
 # --- 主程式執行 ---
 if ticker:
-    max_lookback = max(vol_window, ma_window)
-    raw_df = load_data(ticker, start_date, end_date, max_lookback, is_monthly)
+    # 預抓期數需涵蓋波動度計算期 + 標準化/波動度均線的額外滾動期
+    total_lookback = max(vol_window + extra_lookback, ma_window)
+    raw_df = load_data(ticker, start_date, end_date, total_lookback, is_monthly)
 
     if raw_df.empty:
         st.error(f"找不到代號 `{ticker}` 的資料，請確認股票代號與日期範圍是否正確。")
@@ -215,30 +283,48 @@ if ticker:
         df = raw_df[["Close"]].copy()
         df["Ret"] = df["Close"].pct_change()
 
-        # 1. 動態計算自訂週期的波動度與均線
+        # 1. 計算基礎年化波動度與價格均線
         df["Vol"] = df["Ret"].rolling(window=int(vol_window)).std() * np.sqrt(
             periods_per_year
         )
         df["MA"] = df["Close"].rolling(window=int(ma_window)).mean()
 
-        # 過濾至使用者指定的回測起始日
+        # 2. 根據選擇的波動度模式計算衍生指標與趨勢盤狀態
+        if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
+            if is_low_vol_trend:
+                df["Is_Trend"] = df["Vol"] < vol_threshold
+            else:
+                df["Is_Trend"] = df["Vol"] > vol_threshold
+
+        elif vol_mode == "2. 標準化波動度 (Z-Score) vs 門檻":
+            vol_mean = df["Vol"].rolling(window=int(z_window)).mean()
+            vol_std = df["Vol"].rolling(window=int(z_window)).std()
+            df["Vol_Z"] = (df["Vol"] - vol_mean) / vol_std.replace(0, np.nan)
+            if is_low_vol_trend:
+                df["Is_Trend"] = df["Vol_Z"] < z_threshold
+            else:
+                df["Is_Trend"] = df["Vol_Z"] > z_threshold
+
+        else:  # 3. 波動度與其均線交叉
+            df["Vol_MA"] = df["Vol"].rolling(window=int(vol_ma_window)).mean()
+            if is_low_vol_trend:
+                # 下破波動度均線為趨勢盤
+                df["Is_Trend"] = df["Vol"] < df["Vol_MA"]
+            else:
+                # 上穿波動度均線為趨勢盤
+                df["Is_Trend"] = df["Vol"] > df["Vol_MA"]
+
+        # 過濾至使用者指定的回測起始日並清除前置 NaN
         df = df[df.index >= pd.to_datetime(start_date)].dropna().copy()
 
         min_required_bars = 5 if is_monthly else 10
         if len(df) < min_required_bars:
             st.warning("有效回測資料過少，請將開始日期往前調整，或縮短指標計算週期。")
         else:
-            # 2. 依據使用者選擇的方向判斷趨勢盤
-            if is_low_vol_trend:
-                df["Is_Trend"] = df["Vol"] < vol_threshold
-            else:
-                df["Is_Trend"] = df["Vol"] > vol_threshold
-
-            # 趨勢盤下的均線訊號
+            # 3. 趨勢盤與盤整盤交易訊號
             below_ma_pos = -1 if short_on_breakdown else 0
             trend_signal = np.where(df["Close"] > df["MA"], 1, below_ma_pos)
 
-            # 盤整盤下的訊號處理
             if consolidation_action == "維持買入部位 (部位 = +1)":
                 df["Signal"] = np.where(df["Is_Trend"], trend_signal, 1)
             elif consolidation_action == "全部平倉空手 (部位 = 0)":
@@ -250,10 +336,10 @@ if ticker:
                 )
                 df["Signal"] = raw_sig.ffill().fillna(1)
 
-            # 實際部位：上期收盤確認訊號，本期持有 (避免前視偏誤)
+            # 實際部位：上期收盤確認訊號，本期持有
             df["Position"] = df["Signal"].shift(1).fillna(df["Signal"].iloc[0])
 
-            # 偵測部位切換點（進出場訊號發生期）
+            # 偵測部位切換點
             df["Pos_Change"] = df["Position"].diff()
             df.iloc[0, df.columns.get_loc("Pos_Change")] = df["Position"].iloc[0]
 
@@ -261,14 +347,13 @@ if ticker:
             flat_signals = df[(df["Pos_Change"] != 0) & (df["Position"] == 0)]
             short_signals = df[(df["Pos_Change"] != 0) & (df["Position"] == -1)]
 
-            # 3. 計算策略與 Buy & Hold 報酬與淨值
+            # 4. 計算策略與 Buy & Hold 報酬與淨值
             df["Strat_Ret"] = df["Position"] * df["Ret"]
             df["BH_Ret"] = df["Ret"]
 
             df["Strat_Equity"] = (1 + df["Strat_Ret"]).cumprod()
             df["BH_Equity"] = (1 + df["BH_Ret"]).cumprod()
 
-            # 計算 Drawdown
             df["Strat_DD"] = (
                 df["Strat_Equity"] - df["Strat_Equity"].cummax()
             ) / df["Strat_Equity"].cummax()
@@ -276,14 +361,14 @@ if ticker:
                 df["BH_Equity"] - df["BH_Equity"].cummax()
             ) / df["BH_Equity"].cummax()
 
-            # 4. 計算績效統計表
+            # 5. 計算績效統計表
             strat_metrics = calculate_metrics(
                 df["Strat_Ret"], df["Position"], periods_per_year
             )
             bh_metrics = calculate_metrics(df["BH_Ret"], None, periods_per_year)
 
             st.subheader(
-                f"📊 {ticker.upper()} 績效指標比較【{timeframe}】 (波動度 {op_symbol} {vol_threshold*100:.1f}% 為趨勢盤)"
+                f"📊 {ticker.upper()} 績效指標比較【{timeframe}】 ({regime_desc} 為趨勢盤)"
             )
 
             period_win_label = "持倉月勝率" if is_monthly else "持倉日勝率"
@@ -321,8 +406,18 @@ if ticker:
 
             st.dataframe(metrics_df, use_container_width=True)
 
-            # 5. 繪製 4 層互動式圖表
+            # 6. 繪製 4 層互動式圖表
             st.subheader(f"📈 {timeframe}價格均線訊號、淨值走勢、回撤與盤勢分析")
+
+            if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
+                vol_subplot_title = f"{vol_window}{unit_label}滾動年化波動度 (%) vs 門檻 ({vol_threshold*100:.1f}%)"
+                vol_y_title = "波動度 (%)"
+            elif vol_mode == "2. 標準化波動度 (Z-Score) vs 門檻":
+                vol_subplot_title = f"{vol_window}{unit_label}標準化波動度 (Z-Score, {z_window}{unit_label}基準) vs 門檻 ({z_threshold:.1f}σ)"
+                vol_y_title = "標準差 (σ)"
+            else:
+                vol_subplot_title = f"{vol_window}{unit_label}年化波動度 (%) vs 波動度 {vol_ma_window}{unit_label}均線"
+                vol_y_title = "波動度 (%)"
 
             fig = make_subplots(
                 rows=4,
@@ -334,7 +429,7 @@ if ticker:
                     f"{ticker.upper()} {timeframe}收盤價、{ma_window}{unit_label}均線與買賣訊號 (背景：淺藍=趨勢盤 / 淺橘=盤整盤)",
                     "累積淨值走勢對比",
                     "回撤走勢圖 (Drawdown %)",
-                    f"{vol_window}{unit_label}滾動年化波動度 (%)",
+                    vol_subplot_title,
                 ),
             )
 
@@ -356,14 +451,13 @@ if ticker:
                 go.Scatter(
                     x=df.index,
                     y=df["MA"],
-                    name=f"{ma_window}{unit_label}均線",
+                    name=f"價格{ma_window}{unit_label}均線",
                     line=dict(color="#ff7f0e", width=1.6, dash="dash"),
                 ),
                 row=1,
                 col=1,
             )
 
-            # 買入做多訊號 (綠色向上三角)
             if not buy_signals.empty:
                 fig.add_trace(
                     go.Scatter(
@@ -382,7 +476,6 @@ if ticker:
                     col=1,
                 )
 
-            # 平倉空手訊號 (橘黃色圓點)
             if not flat_signals.empty:
                 fig.add_trace(
                     go.Scatter(
@@ -401,7 +494,6 @@ if ticker:
                     col=1,
                 )
 
-            # 反向做空訊號 (紅色向下三角)
             if not short_signals.empty:
                 fig.add_trace(
                     go.Scatter(
@@ -468,26 +560,76 @@ if ticker:
                 col=1,
             )
 
-            # --- Row 4: 波動度與門檻線 ---
-            fig.add_trace(
-                go.Scatter(
-                    x=df.index,
-                    y=df["Vol"] * 100,
-                    name=f"{vol_window}{unit_label}年化波動度",
-                    line=dict(color="#9467bd", width=1.5),
-                ),
-                row=4,
-                col=1,
-            )
+            # --- Row 4: 依據模式繪製對應的波動度指標 ---
+            if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
+                fig.add_trace(
+                    go.Scatter(
+                        x=df.index,
+                        y=df["Vol"] * 100,
+                        name=f"{vol_window}{unit_label}年化波動度",
+                        line=dict(color="#9467bd", width=1.5),
+                    ),
+                    row=4,
+                    col=1,
+                )
+                fig.add_hline(
+                    y=vol_threshold * 100,
+                    line_dash="dash",
+                    line_color="red",
+                    annotation_text=f"門檻 ({vol_threshold*100:.1f}%)",
+                    row=4,
+                    col=1,
+                )
 
-            fig.add_hline(
-                y=vol_threshold * 100,
-                line_dash="dash",
-                line_color="red",
-                annotation_text=f"門檻 ({vol_threshold*100:.1f}%)",
-                row=4,
-                col=1,
-            )
+            elif vol_mode == "2. 標準化波動度 (Z-Score) vs 門檻":
+                fig.add_trace(
+                    go.Scatter(
+                        x=df.index,
+                        y=df["Vol_Z"],
+                        name="標準化波動度 (Z-Score)",
+                        line=dict(color="#9467bd", width=1.5),
+                    ),
+                    row=4,
+                    col=1,
+                )
+                fig.add_hline(
+                    y=z_threshold,
+                    line_dash="dash",
+                    line_color="red",
+                    annotation_text=f"門檻 ({z_threshold:.1f}σ)",
+                    row=4,
+                    col=1,
+                )
+                fig.add_hline(
+                    y=0,
+                    line_dash="dot",
+                    line_color="gray",
+                    opacity=0.5,
+                    row=4,
+                    col=1,
+                )
+
+            else:  # 3. 波動度與其均線交叉
+                fig.add_trace(
+                    go.Scatter(
+                        x=df.index,
+                        y=df["Vol"] * 100,
+                        name=f"{vol_window}{unit_label}年化波動度",
+                        line=dict(color="#9467bd", width=1.6),
+                    ),
+                    row=4,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=df.index,
+                        y=df["Vol_MA"] * 100,
+                        name=f"波動度{vol_ma_window}{unit_label}均線",
+                        line=dict(color="#e67e22", width=1.6, dash="dash"),
+                    ),
+                    row=4,
+                    col=1,
+                )
 
             # 標示趨勢盤與盤整盤區間
             df["Regime_Group"] = (
@@ -530,11 +672,11 @@ if ticker:
             fig.update_yaxes(title_text="價格", row=1, col=1)
             fig.update_yaxes(title_text="淨值 (倍數)", row=2, col=1)
             fig.update_yaxes(title_text="回撤 (%)", row=3, col=1)
-            fig.update_yaxes(title_text="波動度 (%)", row=4, col=1)
+            fig.update_yaxes(title_text=vol_y_title, row=4, col=1)
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # 6. 盤勢與倉位狀態統計摘要
+            # 7. 盤勢與倉位狀態統計摘要
             trend_pct = df["Is_Trend"].mean() * 100
             long_pct = (df["Position"] == 1).mean() * 100
             flat_pct = (df["Position"] == 0).mean() * 100
