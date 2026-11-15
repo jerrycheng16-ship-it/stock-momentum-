@@ -10,7 +10,7 @@ import yfinance as yf
 st.set_page_config(page_title="波動度濾網與均線策略回測", layout="wide")
 st.title("📈 波動度狀態切換 × 均線策略回測系統")
 
-# 內建常用隱含波動度指數清單（新增 ^MOVE 美債波動率指數）
+# 內建常用隱含波動度指數清單
 IV_OPTIONS = {
     "^VIX (S&P 500 恐慌指數 - 美股大盤)": "^VIX",
     "^VXN (Nasdaq 100 波動率 - 科技/半導體)": "^VXN",
@@ -1056,20 +1056,24 @@ if ticker:
                 )
 
                 # ==========================================
-                # 月線逐月計算過程明細表（僅月線模式顯示）
+                # 月線逐月計算過程明細表（改法 B：訊號驗證視角，僅月線模式顯示）
                 # ==========================================
                 if is_monthly:
                     st.markdown("---")
-                    st.subheader("📋 月線逐月計算過程明細表（由新到舊排列）")
+                    st.subheader("📋 月線逐月計算過程與應用報酬驗證表（由新到舊排列）")
                     st.caption(
-                        "說明：每月最後一個交易日收盤計算指標與盤勢，產生「當月收盤訊號」後，於「訊號應用月份」正式持有該部位並計算報酬。"
+                        "說明：每一列為「訊號計算日」當月底收盤計算出的指標與訊號，右側對應欄位直接顯示該訊號在「訊號應用月份（次月）」實際執行的部位與結算報酬。"
                     )
 
                     apply_months = (df.index.to_period("M") + 1).astype(str)
 
+                    # 將次月（應用月份）的報酬與淨值往回對齊至訊號計算日那一列
+                    next_bh_ret = df["BH_Ret"].shift(-1)
+                    next_strat_ret = df["Strat_Ret"].shift(-1)
+                    next_strat_eq = df["Strat_Equity"].shift(-1)
+
                     table_data = {
                         "訊號計算日": df.index.strftime("%Y-%m-%d"),
-                        "訊號應用月份": apply_months,
                         "月底收盤價": df["Close"].map(lambda x: f"{x:.2f}"),
                         f"價格{ma_window}月均線": df["MA"].map(
                             lambda x: f"{x:.2f}"
@@ -1100,20 +1104,24 @@ if ticker:
                             "判定盤勢": np.where(
                                 df["Is_Trend"], "趨勢盤", "盤整盤"
                             ),
-                            "收盤產生訊號 (下月執行)": df["Signal"].map(
+                            "訊號應用月份": apply_months,
+                            "應用月份執行部位": df["Signal"].map(
                                 lambda x: format_pos_label(int(x))
                             ),
-                            "當月實際持有部位": df["Position"].map(
-                                lambda x: format_pos_label(int(x))
-                            ),
-                            "標的月報酬": df["BH_Ret"].map(
+                            "應用月份標的報酬": next_bh_ret.map(
                                 lambda x: f"{x*100:+.2f}%"
+                                if pd.notna(x)
+                                else "待次月結算"
                             ),
-                            "策略月報酬": df["Strat_Ret"].map(
+                            "應用月份策略報酬": next_strat_ret.map(
                                 lambda x: f"{x*100:+.2f}%"
+                                if pd.notna(x)
+                                else "待次月結算"
                             ),
-                            "策略累積淨值": df["Strat_Equity"].map(
+                            "應用月底策略淨值": next_strat_eq.map(
                                 lambda x: f"{x:.3f}"
+                                if pd.notna(x)
+                                else "待次月結算"
                             ),
                         }
                     )
