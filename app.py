@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import hmac
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -6,8 +7,58 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-# 頁面設定
+# 頁面設定（必須為第一個 Streamlit 指令）
 st.set_page_config(page_title="波動度濾網與均線策略回測", layout="wide")
+
+
+# ==========================================
+# 帳號密碼驗證模組（讀取 st.secrets["passwords"]）
+# ==========================================
+def check_authentication():
+    """驗證使用者帳號密碼，未通過前阻擋後續程式執行"""
+    if st.session_state.get("authenticated", False):
+        return True
+
+    st.title("🔒 波動度狀態切換 × 均線策略回測系統")
+    st.markdown("請輸入授權帳號與密碼以進入系統：")
+
+    col_login, _ = st.columns([1, 1.5])
+    with col_login:
+        with st.form("login_form"):
+            username_input = st.text_input("帳號 (Username)")
+            password_input = st.text_input("密碼 (Password)", type="password")
+            submitted = st.form_submit_button("登入系統", use_container_width=True)
+
+            if submitted:
+                try:
+                    passwords_dict = st.secrets["passwords"]
+                except Exception:
+                    st.error(
+                        "⚠️ 系統尚未設定 `[passwords]` Secrets，請至 Streamlit Cloud 後台 Secrets 或本機 `.streamlit/secrets.toml` 完成設定。"
+                    )
+                    return False
+
+                user_clean = username_input.strip()
+                if user_clean in passwords_dict and hmac.compare_digest(
+                    str(password_input), str(passwords_dict[user_clean])
+                ):
+                    st.session_state["authenticated"] = True
+                    st.session_state["current_user"] = user_clean
+                    st.rerun()
+                else:
+                    st.error("❌ 帳號或密碼錯誤，請重新確認後再試。")
+
+    return False
+
+
+# 若未通過登入驗證，直接停止執行下方所有回測與介面程式碼
+if not check_authentication():
+    st.stop()
+
+
+# ==========================================
+# 通過驗證後的主應用程式
+# ==========================================
 st.title("📈 波動度狀態切換 × 均線策略回測系統")
 
 # 內建常用隱含波動度指數清單
@@ -103,6 +154,17 @@ if "initialized" not in st.session_state:
 
 # --- 側邊欄參數設定 ---
 with st.sidebar:
+    # 顯示登入狀態與登出按鈕
+    user_col, logout_col = st.columns([2, 1])
+    with user_col:
+        st.caption(f"👤 已登入：`{st.session_state.get('current_user', '')}`")
+    with logout_col:
+        if st.button("登出", use_container_width=True):
+            st.session_state["authenticated"] = False
+            st.session_state.pop("current_user", None)
+            st.rerun()
+
+    st.markdown("---")
     st.header("⚡ 快速參數範本")
     st.selectbox(
         "選擇資產類別參數範本（一鍵套用）",
@@ -1056,7 +1118,7 @@ if ticker:
                 )
 
                 # ==========================================
-                # 月線逐月計算過程明細表（改法 B：訊號驗證視角，僅月線模式顯示）
+                # 月線逐月計算過程明細表（訊號驗證視角，僅月線模式顯示）
                 # ==========================================
                 if is_monthly:
                     st.markdown("---")
@@ -1067,7 +1129,6 @@ if ticker:
 
                     apply_months = (df.index.to_period("M") + 1).astype(str)
 
-                    # 將次月（應用月份）的報酬與淨值往回對齊至訊號計算日那一列
                     next_bh_ret = df["BH_Ret"].shift(-1)
                     next_strat_ret = df["Strat_Ret"].shift(-1)
                     next_strat_eq = df["Strat_Equity"].shift(-1)
