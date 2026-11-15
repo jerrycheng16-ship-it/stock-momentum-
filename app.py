@@ -40,7 +40,7 @@ with st.sidebar:
             "標的自身歷史波動度 (HV)",
             "外部隱含波動度指數 (IV Index)",
         ],
-        index=1,  # 預設為外部隱含波動度指數 (IV Index)
+        index=1,
         help="HV：依據標的自身過去漲跌幅計算；IV Index：抓取市場恐慌/隱含波動率指數作為領先情緒濾網。",
     )
     use_external_iv = vol_source == "外部隱含波動度指數 (IV Index)"
@@ -50,7 +50,7 @@ with st.sidebar:
         selected_iv_label = st.selectbox(
             "選擇隱含波動度指數",
             options=list(IV_OPTIONS.keys()),
-            index=0,  # 預設為 ^VIX
+            index=0,
             help="直接從下拉選單選擇對應市場的 30 天期隱含波動率指數，無需手動輸入。",
         )
         if IV_OPTIONS[selected_iv_label] == "CUSTOM":
@@ -61,7 +61,7 @@ with st.sidebar:
     timeframe = st.radio(
         "資料頻率（觀察週期）",
         options=["日線 (Daily)", "月線 (Monthly)"],
-        index=1,  # 預設為月線 (Monthly)
+        index=1,
         horizontal=True,
         help="日線：每日收盤計算指標，次日執行；月線：每月最後交易日收盤計算指標，次月執行。",
     )
@@ -79,7 +79,6 @@ with st.sidebar:
     st.subheader(f"📐 指標週期設定（單位：{unit_label}）")
 
     default_vol_win = 12 if is_monthly else 252
-    # 月線預設 6 個月均線，日線預設 126 日均線（半年線）
     default_ma_win = 6 if is_monthly else 126
 
     if not use_external_iv:
@@ -117,7 +116,7 @@ with st.sidebar:
             "3. 波動度與其均線交叉 (波動度均線)",
             "4. 標準化波動度 + 均線交叉雙重過濾 (高低檔位觸發)",
         ],
-        index=3,  # 預設為模式 4：標準化波動度 + 均線交叉雙重過濾
+        index=3,
         help="模式 4 結合標準化波動度高低檔位與均線突破/跌破，採用狀態記憶機制避免頻繁切換。",
     )
 
@@ -244,7 +243,7 @@ with st.sidebar:
                 "低檔上穿均線 → 趨勢盤｜高檔下破均線 → 盤整盤",
                 "高檔下破均線 → 趨勢盤｜低檔上穿均線 → 盤整盤",
             ],
-            index=1,  # 預設為：高檔下破均線 → 趨勢盤｜低檔上穿均線 → 盤整盤
+            index=1,
         )
         is_low_cross_up_trend = (
             dual_direction
@@ -301,18 +300,18 @@ def load_data(symbol, start, end, lookback_periods, monthly_mode):
         buffer_calendar_days = int(lookback_periods * 1.6) + 30
 
     fetch_start = start - timedelta(days=buffer_calendar_days)
-    df = yf.download(symbol, start=fetch_start, end=end, progress=False)
+    # end_date 往後加一天以確保 yfinance 包含結束日當天資料
+    fetch_end = end + timedelta(days=1)
+    df = yf.download(symbol, start=fetch_start, end=fetch_end, progress=False)
     if df.empty:
         return df
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     if monthly_mode:
-        try:
-            df = df.resample("ME").last()
-        except ValueError:
-            df = df.resample("M").last()
+        # 保留每月實際最後一個交易日的日期索引與收盤價
         df = df.dropna(subset=["Close"])
+        df = df.groupby(df.index.to_period("M")).tail(1)
 
     return df
 
@@ -369,6 +368,15 @@ def calculate_metrics(returns_series, position_series=None, ann_factor=252):
     }
 
 
+def format_pos_label(pos_val):
+    if pos_val == 1:
+        return "買入做多 (+1)"
+    elif pos_val == -1:
+        return "反向做空 (-1)"
+    else:
+        return "平倉空手 (0)"
+
+
 # --- 主程式執行 ---
 if ticker:
     total_lookback = max(vol_window + extra_lookback, ma_window)
@@ -393,8 +401,19 @@ if ticker:
                 )
                 iv_load_failed = True
             else:
-                iv_series = (iv_raw["Close"] / 100.0).reindex(df.index).ffill()
-                df["Vol"] = iv_series
+                if is_monthly:
+                    # 月線模式下依照月份對齊，避免台美月底最後交易日差 1~2 天導致對齊失敗
+                    iv_monthly_map = (iv_raw["Close"] / 100.0).groupby(
+                        iv_raw.index.to_period("M")
+                    ).last()
+                    df["Vol"] = (
+                        df.index.to_period("M").map(iv_monthly_map).ffill()
+                    )
+                else:
+                    iv_series = (
+                        (iv_raw["Close"] / 100.0).reindex(df.index).ffill()
+                    )
+                    df["Vol"] = iv_series
         else:
             df["Vol"] = df["Ret"].rolling(window=int(vol_window)).std() * np.sqrt(
                 periods_per_year
@@ -501,6 +520,58 @@ if ticker:
                 df["BH_DD"] = (
                     df["BH_Equity"] - df["BH_Equity"].cummax()
                 ) / df["BH_Equity"].cummax()
+
+                # ==========================================
+                # 新增區塊 A：最新即時訊號看板（訊號計算日 & 應用日）
+                # ==========================================
+                latest_row = df.iloc[-1]
+                calc_date = df.index[-1]
+                calc_date_str = calc_date.strftime("%Y-%m-%d")
+
+                if is_monthly:
+                    next_period = calc_date.to_period("M") + 1
+                    apply_date_str = f"{next_period.year} 年 {next_period.month:02d} 月（次月首個交易日起）"
+                else:
+                    next_bday = calc_date + pd.tseries.offsets.BDay(1)
+                    apply_date_str = f"{next_bday.strftime('%Y-%m-%d')}（次一交易日）"
+
+                latest_sig_val = int(latest_row["Signal"])
+                latest_sig_label = format_pos_label(latest_sig_val)
+                latest_regime = "趨勢盤 (均線濾網啟動)" if latest_row["Is_Trend"] else "盤整盤 (執行盤整規則)"
+
+                st.subheader(f"🚦 {ticker.upper()} 最新即時交易訊號")
+                sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
+
+                with sig_col1:
+                    st.metric(
+                        label="📅 訊號計算日（最新收盤）",
+                        value=calc_date_str,
+                        delta=f"收盤價: {latest_row['Close']:.2f} | {ma_window}{unit_label}線: {latest_row['MA']:.2f}",
+                        delta_color="off",
+                    )
+                with sig_col2:
+                    st.metric(
+                        label="⏭️ 訊號應用日（生效時間）",
+                        value=apply_date_str.split("（")[0],
+                        delta=apply_date_str.split("（")[1].rstrip("）"),
+                        delta_color="off",
+                    )
+                with sig_col3:
+                    st.metric(
+                        label="🌊 最新判定盤勢",
+                        value="趨勢盤" if latest_row["Is_Trend"] else "盤整盤",
+                        delta=latest_regime,
+                        delta_color="off",
+                    )
+                with sig_col4:
+                    st.metric(
+                        label="🎯 最新目標部位（應用日執行）",
+                        value=latest_sig_label,
+                        delta=f"前期實際持有: {format_pos_label(int(latest_row['Position']))}",
+                        delta_color="normal" if latest_sig_val == 1 else ("inverse" if latest_sig_val == -1 else "off"),
+                    )
+
+                st.markdown("---")
 
                 # 5. 計算績效統計表
                 strat_metrics = calculate_metrics(
@@ -890,3 +961,80 @@ if ticker:
                     f"💡 **區間與倉位統計（{timeframe}）**：回測期間內**趨勢盤**佔比 `{trend_pct:.1f}%`、**盤整盤**佔比 `{100-trend_pct:.1f}%`｜"
                     f"倉位時間分佈：**做多** `{long_pct:.1f}%`、**空手** `{flat_pct:.1f}%`、**做空** `{short_pct:.1f}%`。"
                 )
+
+                # ==========================================
+                # 新增區塊 B：月線逐月計算過程明細表（僅月線模式顯示）
+                # ==========================================
+                if is_monthly:
+                    st.markdown("---")
+                    st.subheader("📋 月線逐月計算過程明細表（由新到舊排列）")
+                    st.caption(
+                        "說明：每月最後一個交易日收盤計算指標與盤勢，產生「當月收盤訊號」後，於「訊號應用月份」正式持有該部位並計算報酬。"
+                    )
+
+                    # 計算每列對應的「訊號應用月份」
+                    apply_months = (df.index.to_period("M") + 1).astype(str)
+
+                    table_data = {
+                        "訊號計算日": df.index.strftime("%Y-%m-%d"),
+                        "訊號應用月份": apply_months,
+                        "月底收盤價": df["Close"].map(lambda x: f"{x:.2f}"),
+                        f"價格{ma_window}月均線": df["MA"].map(
+                            lambda x: f"{x:.2f}"
+                        ),
+                        "均線狀態": np.where(
+                            df["Close"] > df["MA"], "站上均線", "跌破均線"
+                        ),
+                        "波動度 (%)": df["Vol"].map(
+                            lambda x: f"{x*100:.2f}%"
+                        ),
+                    }
+
+                    # 依據不同波動度模式加入對應的衍生指標欄位
+                    if "Vol_Z" in df.columns:
+                        table_data["標準化波動度 (Z-Score)"] = df["Vol_Z"].map(
+                            lambda x: f"{x:.2f}σ"
+                        )
+                    if "Vol_Z_MA" in df.columns:
+                        table_data[f"Z-Score {z_ma_window}月均線"] = df[
+                            "Vol_Z_MA"
+                        ].map(lambda x: f"{x:.2f}σ")
+                    if "Vol_MA" in df.columns:
+                        table_data[f"波動度{vol_ma_window}月均線 (%)"] = df[
+                            "Vol_MA"
+                        ].map(lambda x: f"{x*100:.2f}%")
+
+                    table_data.update(
+                        {
+                            "判定盤勢": np.where(
+                                df["Is_Trend"], "趨勢盤", "盤整盤"
+                            ),
+                            "收盤產生訊號 (下月執行)": df["Signal"].map(
+                                lambda x: format_pos_label(int(x))
+                            ),
+                            "當月實際持有部位": df["Position"].map(
+                                lambda x: format_pos_label(int(x))
+                            ),
+                            "標的月報酬": df["BH_Ret"].map(
+                                lambda x: f"{x*100:+.2f}%"
+                            ),
+                            "策略月報酬": df["Strat_Ret"].map(
+                                lambda x: f"{x*100:+.2f}%"
+                            ),
+                            "策略累積淨值": df["Strat_Equity"].map(
+                                lambda x: f"{x:.3f}"
+                            ),
+                        }
+                    )
+
+                    monthly_detail_df = pd.DataFrame(table_data)
+                    # 由最新月份往回排列，方便對照最新一期計算過程
+                    monthly_detail_df = monthly_detail_df.iloc[::-1].reset_index(
+                        drop=True
+                    )
+
+                    st.dataframe(
+                        monthly_detail_df,
+                        use_container_width=True,
+                        height=500,
+                    )
