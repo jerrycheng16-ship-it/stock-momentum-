@@ -105,7 +105,7 @@ def load_data(symbol, start, end, lookback_days):
     return df
 
 
-# --- 績效指標計算函數（支援多頭、空手與反向做空波段計算） ---
+# --- 績效指標計算函數 ---
 def calculate_metrics(returns_series, position_series=None):
     cum_returns = (1 + returns_series).cumprod()
     total_return = cum_returns.iloc[-1] - 1
@@ -123,7 +123,6 @@ def calculate_metrics(returns_series, position_series=None):
 
     # 勝率計算
     if position_series is not None:
-        # 持有部位（做多或做空）期間的日勝率
         active_days = returns_series[position_series != 0]
         daily_win_rate = (
             (active_days > 0).mean() if len(active_days) > 0 else 0.0
@@ -199,6 +198,15 @@ if ticker:
             # 實際部位：昨日收盤確認訊號，今日持有 (避免前視偏誤)
             df["Position"] = df["Signal"].shift(1).fillna(1)
 
+            # 偵測部位切換點（進出場訊號發生日）
+            df["Pos_Change"] = df["Position"].diff()
+            # 第一天若直接持有部位也標記為初始進場
+            df.iloc[0, df.columns.get_loc("Pos_Change")] = df["Position"].iloc[0]
+
+            buy_signals = df[(df["Pos_Change"] != 0) & (df["Position"] == 1)]
+            flat_signals = df[(df["Pos_Change"] != 0) & (df["Position"] == 0)]
+            short_signals = df[(df["Pos_Change"] != 0) & (df["Position"] == -1)]
+
             # 3. 計算策略與 Buy & Hold 報酬與淨值
             df["Strat_Ret"] = df["Position"] * df["Ret"]
             df["BH_Ret"] = df["Ret"]
@@ -255,23 +263,104 @@ if ticker:
 
             st.dataframe(metrics_df, use_container_width=True)
 
-            # 5. 繪製互動式圖表
-            st.subheader("📈 淨值走勢、回撤 (Drawdown) 與盤勢狀態分析")
+            # 5. 繪製 4 層互動式圖表
+            st.subheader("📈 價格均線訊號、淨值走勢、回撤與盤勢分析")
 
             fig = make_subplots(
-                rows=3,
+                rows=4,
                 cols=1,
                 shared_xaxes=True,
-                vertical_spacing=0.06,
-                row_heights=[0.5, 0.25, 0.25],
+                vertical_spacing=0.05,
+                row_heights=[0.32, 0.32, 0.18, 0.18],
                 subplot_titles=(
-                    f"累積淨值走勢圖 (背景色：淺藍=趨勢盤 [波動度{op_symbol}{vol_threshold*100:.1f}%] / 淺橘=盤整盤)",
+                    f"{ticker.upper()} 股價、{ma_window}日均線與買賣訊號 (背景：淺藍=趨勢盤 / 淺橘=盤整盤)",
+                    "累積淨值走勢對比",
                     "回撤走勢圖 (Drawdown %)",
                     f"{vol_window}日滾動年化波動度 (%)",
                 ),
             )
 
-            # 淨值曲線
+            # --- Row 1: 股價、均線與買賣訊號 ---
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["Close"],
+                    name="收盤價",
+                    line=dict(color="#2c3e50", width=1.6),
+                ),
+                row=1,
+                col=1,
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["MA"],
+                    name=f"{ma_window}日均線",
+                    line=dict(color="#ff7f0e", width=1.5, dash="dash"),
+                ),
+                row=1,
+                col=1,
+            )
+
+            # 買入做多訊號 (綠色向上三角)
+            if not buy_signals.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=buy_signals.index,
+                        y=buy_signals["Close"],
+                        mode="markers",
+                        name="買入做多 (+1)",
+                        marker=dict(
+                            symbol="triangle-up",
+                            size=10,
+                            color="#00b050",
+                            line=dict(width=1, color="white"),
+                        ),
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+            # 平倉空手訊號 (橘黃色圓點)
+            if not flat_signals.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=flat_signals.index,
+                        y=flat_signals["Close"],
+                        mode="markers",
+                        name="平倉空手 (0)",
+                        marker=dict(
+                            symbol="circle",
+                            size=9,
+                            color="#f39c12",
+                            line=dict(width=1, color="white"),
+                        ),
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+            # 反向做空訊號 (紅色向下三角)
+            if not short_signals.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=short_signals.index,
+                        y=short_signals["Close"],
+                        mode="markers",
+                        name="反向做空 (-1)",
+                        marker=dict(
+                            symbol="triangle-down",
+                            size=10,
+                            color="#e74c3c",
+                            line=dict(width=1, color="white"),
+                        ),
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+            # --- Row 2: 淨值曲線 ---
             fig.add_trace(
                 go.Scatter(
                     x=df.index,
@@ -279,7 +368,7 @@ if ticker:
                     name="波動度濾網策略",
                     line=dict(color="#1f77b4", width=2.2),
                 ),
-                row=1,
+                row=2,
                 col=1,
             )
 
@@ -290,11 +379,11 @@ if ticker:
                     name="Buy & Hold",
                     line=dict(color="#7f7f7f", width=1.8, dash="dot"),
                 ),
-                row=1,
+                row=2,
                 col=1,
             )
 
-            # Drawdown 曲線
+            # --- Row 3: Drawdown 曲線 ---
             fig.add_trace(
                 go.Scatter(
                     x=df.index,
@@ -304,7 +393,7 @@ if ticker:
                     line=dict(color="#1f77b4", width=1.2),
                     fillcolor="rgba(31, 119, 180, 0.2)",
                 ),
-                row=2,
+                row=3,
                 col=1,
             )
 
@@ -315,11 +404,11 @@ if ticker:
                     name="Buy & Hold Drawdown",
                     line=dict(color="#d62728", width=1.2),
                 ),
-                row=2,
+                row=3,
                 col=1,
             )
 
-            # 波動度與門檻線
+            # --- Row 4: 波動度與門檻線 ---
             fig.add_trace(
                 go.Scatter(
                     x=df.index,
@@ -327,7 +416,7 @@ if ticker:
                     name=f"{vol_window}日年化波動度",
                     line=dict(color="#9467bd", width=1.5),
                 ),
-                row=3,
+                row=4,
                 col=1,
             )
 
@@ -336,11 +425,11 @@ if ticker:
                 line_dash="dash",
                 line_color="red",
                 annotation_text=f"門檻 ({vol_threshold*100:.1f}%)",
-                row=3,
+                row=4,
                 col=1,
             )
 
-            # 標示趨勢盤與盤整盤區間（顏色定義維持一致：淺藍=趨勢盤、淺橘=盤整盤）
+            # 標示趨勢盤與盤整盤區間（同步繪製在 Row 1 價格圖與 Row 2 淨值圖）
             df["Regime_Group"] = (
                 df["Is_Trend"] != df["Is_Trend"].shift()
             ).cumsum()
@@ -354,32 +443,34 @@ if ticker:
                     else "rgba(255, 167, 38, 0.18)"
                 )
 
-                fig.add_vrect(
-                    x0=x0,
-                    x1=x1,
-                    fillcolor=fill_color,
-                    layer="below",
-                    line_width=0,
-                    row=1,
-                    col=1,
-                )
+                for r in [1, 2]:
+                    fig.add_vrect(
+                        x0=x0,
+                        x1=x1,
+                        fillcolor=fill_color,
+                        layer="below",
+                        line_width=0,
+                        row=r,
+                        col=1,
+                    )
 
             # 圖表版面配置
             fig.update_layout(
-                height=800,
+                height=1050,
                 hovermode="x unified",
                 legend=dict(
                     orientation="h",
                     yanchor="bottom",
-                    y=1.02,
+                    y=1.01,
                     xanchor="right",
                     x=1,
                 ),
-                margin=dict(l=20, r=20, t=60, b=20),
+                margin=dict(l=20, r=20, t=70, b=20),
             )
-            fig.update_yaxes(title_text="淨值 (倍數)", row=1, col=1)
-            fig.update_yaxes(title_text="回撤 (%)", row=2, col=1)
-            fig.update_yaxes(title_text="波動度 (%)", row=3, col=1)
+            fig.update_yaxes(title_text="價格", row=1, col=1)
+            fig.update_yaxes(title_text="淨值 (倍數)", row=2, col=1)
+            fig.update_yaxes(title_text="回撤 (%)", row=3, col=1)
+            fig.update_yaxes(title_text="波動度 (%)", row=4, col=1)
 
             st.plotly_chart(fig, use_container_width=True)
 
