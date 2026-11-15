@@ -74,7 +74,6 @@ with st.sidebar:
         help="標準化波動度可消除不同個股天生波動率高低的差異；波動度均線交叉則觀察波動度本身的趨勢變化。",
     )
 
-    # 根據選擇的模式動態顯示對應參數
     extra_lookback = 0
     if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
         trend_condition = st.radio(
@@ -131,7 +130,7 @@ with st.sidebar:
         op_symbol = "<" if is_low_vol_trend else ">"
         regime_desc = f"標準化波動度 {op_symbol} {z_threshold:.1f}σ"
 
-    else:  # 3. 波動度與其均線交叉
+    else:
         vol_ma_window = st.number_input(
             f"波動度均線週期 ({unit_label})",
             min_value=2,
@@ -304,7 +303,7 @@ if ticker:
             else:
                 df["Is_Trend"] = df["Vol_Z"] > z_threshold
 
-        else:  # 3. 波動度與其均線交叉
+        else:
             df["Vol_MA"] = df["Vol"].rolling(window=int(vol_ma_window)).mean()
             if is_low_vol_trend:
                 df["Is_Trend"] = df["Vol"] < df["Vol_MA"]
@@ -403,7 +402,7 @@ if ticker:
 
             st.dataframe(metrics_df, use_container_width=True)
 
-            # 6. 繪製 4 層互動式圖表
+            # 6. 繪製 4 層高對比度互動式圖表
             st.subheader(f"📈 {timeframe}價格均線訊號、淨值走勢、回撤與盤勢分析")
 
             if vol_mode == "1. 原始波動度 (%) vs 固定門檻":
@@ -420,25 +419,25 @@ if ticker:
                 rows=4,
                 cols=1,
                 shared_xaxes=True,
-                vertical_spacing=0.05,
+                vertical_spacing=0.06,
                 row_heights=[0.32, 0.32, 0.18, 0.18],
                 subplot_titles=(
-                    f"{ticker.upper()} {timeframe}收盤價、{ma_window}{unit_label}均線與買賣訊號 (背景：藍色=趨勢盤 / 橘色=盤整盤)",
+                    f"{ticker.upper()} {timeframe}收盤價、{ma_window}{unit_label}均線與買賣訊號 (背景：青藍=趨勢盤 / 暖橘=盤整盤)",
                     "累積淨值走勢對比",
                     "回撤走勢圖 (Drawdown %)",
                     vol_subplot_title,
                 ),
             )
 
-            # --- Row 1: 股價、均線與買賣訊號 ---
+            # --- Row 1: 高亮度收盤價、黃色均線與高對比買賣訊號 ---
             fig.add_trace(
                 go.Scatter(
                     x=df.index,
                     y=df["Close"],
                     name=f"{'月底' if is_monthly else ''}收盤價",
-                    line=dict(color="#2c3e50", width=1.8),
+                    line=dict(color="#F8FAFC", width=2.2),
                     mode="lines+markers" if is_monthly else "lines",
-                    marker=dict(size=4),
+                    marker=dict(size=5, color="#F8FAFC"),
                 ),
                 row=1,
                 col=1,
@@ -449,7 +448,7 @@ if ticker:
                     x=df.index,
                     y=df["MA"],
                     name=f"價格{ma_window}{unit_label}均線",
-                    line=dict(color="#ff7f0e", width=1.6, dash="dash"),
+                    line=dict(color="#FACC15", width=2.0, dash="dash"),
                 ),
                 row=1,
                 col=1,
@@ -464,9 +463,9 @@ if ticker:
                         name="買入做多 (+1)",
                         marker=dict(
                             symbol="triangle-up",
-                            size=11,
-                            color="#00b050",
-                            line=dict(width=1, color="white"),
+                            size=12,
+                            color="#22C55E",
+                            line=dict(width=1.2, color="#0F172A"),
                         ),
                     ),
                     row=1,
@@ -482,9 +481,9 @@ if ticker:
                         name="平倉空手 (0)",
                         marker=dict(
                             symbol="circle",
-                            size=10,
-                            color="#f39c12",
-                            line=dict(width=1, color="white"),
+                            size=11,
+                            color="#FB923C",
+                            line=dict(width=1.2, color="#0F172A"),
                         ),
                     ),
                     row=1,
@@ -500,22 +499,22 @@ if ticker:
                         name="反向做空 (-1)",
                         marker=dict(
                             symbol="triangle-down",
-                            size=11,
-                            color="#e74c3c",
-                            line=dict(width=1, color="white"),
+                            size=12,
+                            color="#F43F5E",
+                            line=dict(width=1.2, color="#0F172A"),
                         ),
                     ),
                     row=1,
                     col=1,
                 )
 
-            # --- Row 2: 淨值曲線 ---
+            # --- Row 2: 高對比淨值曲線 ---
             fig.add_trace(
                 go.Scatter(
                     x=df.index,
                     y=df["Strat_Equity"],
                     name="波動度濾網策略",
-                    line=dict(color="#1f77b4", width=2.2),
+                    line=dict(color="#38BDF8", width=2.6),
                 ),
                 row=2,
                 col=1,
@@ -526,7 +525,7 @@ if ticker:
                     x=df.index,
                     y=df["BH_Equity"],
                     name="Buy & Hold",
-                    line=dict(color="#7f7f7f", width=1.8, dash="dot"),
+                    line=dict(color="#E2E8F0", width=2.0, dash="dot"),
                 ),
                 row=2,
                 col=1,
@@ -539,8 +538,8 @@ if ticker:
                     y=df["Strat_DD"] * 100,
                     name="策略 Drawdown",
                     fill="tozeroy",
-                    line=dict(color="#1f77b4", width=1.2),
-                    fillcolor="rgba(31, 119, 180, 0.2)",
+                    line=dict(color="#38BDF8", width=1.6),
+                    fillcolor="rgba(56, 189, 248, 0.25)",
                 ),
                 row=3,
                 col=1,
@@ -551,7 +550,7 @@ if ticker:
                     x=df.index,
                     y=df["BH_DD"] * 100,
                     name="Buy & Hold Drawdown",
-                    line=dict(color="#d62728", width=1.2),
+                    line=dict(color="#F43F5E", width=1.6),
                 ),
                 row=3,
                 col=1,
@@ -564,7 +563,7 @@ if ticker:
                         x=df.index,
                         y=df["Vol"] * 100,
                         name=f"{vol_window}{unit_label}年化波動度",
-                        line=dict(color="#9467bd", width=1.5),
+                        line=dict(color="#C084FC", width=2.0),
                     ),
                     row=4,
                     col=1,
@@ -572,7 +571,7 @@ if ticker:
                 fig.add_hline(
                     y=vol_threshold * 100,
                     line_dash="dash",
-                    line_color="red",
+                    line_color="#F43F5E",
                     annotation_text=f"門檻 ({vol_threshold*100:.1f}%)",
                     row=4,
                     col=1,
@@ -584,7 +583,7 @@ if ticker:
                         x=df.index,
                         y=df["Vol_Z"],
                         name="標準化波動度 (Z-Score)",
-                        line=dict(color="#9467bd", width=1.5),
+                        line=dict(color="#C084FC", width=2.0),
                     ),
                     row=4,
                     col=1,
@@ -592,7 +591,7 @@ if ticker:
                 fig.add_hline(
                     y=z_threshold,
                     line_dash="dash",
-                    line_color="red",
+                    line_color="#F43F5E",
                     annotation_text=f"門檻 ({z_threshold:.1f}σ)",
                     row=4,
                     col=1,
@@ -600,19 +599,19 @@ if ticker:
                 fig.add_hline(
                     y=0,
                     line_dash="dot",
-                    line_color="gray",
-                    opacity=0.5,
+                    line_color="#94A3B8",
+                    opacity=0.6,
                     row=4,
                     col=1,
                 )
 
-            else:  # 3. 波動度與其均線交叉
+            else:
                 fig.add_trace(
                     go.Scatter(
                         x=df.index,
                         y=df["Vol"] * 100,
                         name=f"{vol_window}{unit_label}年化波動度",
-                        line=dict(color="#9467bd", width=1.6),
+                        line=dict(color="#C084FC", width=2.0),
                     ),
                     row=4,
                     col=1,
@@ -622,13 +621,13 @@ if ticker:
                         x=df.index,
                         y=df["Vol_MA"] * 100,
                         name=f"波動度{vol_ma_window}{unit_label}均線",
-                        line=dict(color="#e67e22", width=1.6, dash="dash"),
+                        line=dict(color="#FACC15", width=1.8, dash="dash"),
                     ),
                     row=4,
                     col=1,
                 )
 
-            # 標示趨勢盤與盤整盤區間（將 x1 延伸至下一期起點，消除單期狀態變黑縫的問題）
+            # 標示趨勢盤與盤整盤區間（無縫銜接）
             df["Regime_Group"] = (
                 df["Is_Trend"] != df["Is_Trend"].shift()
             ).cumsum()
@@ -644,9 +643,9 @@ if ticker:
                 )
 
                 fill_color = (
-                    "rgba(100, 181, 246, 0.22)"
+                    "rgba(56, 189, 248, 0.16)"
                     if is_trend
-                    else "rgba(255, 167, 38, 0.22)"
+                    else "rgba(251, 146, 60, 0.14)"
                 )
 
                 for r in [1, 2]:
@@ -660,18 +659,18 @@ if ticker:
                         col=1,
                     )
 
-            # 圖表版面配置
+            # 圖表版面配置（拉高頂部空間避免圖例重疊標題）
             fig.update_layout(
-                height=1050,
+                height=1100,
                 hovermode="x unified",
                 legend=dict(
                     orientation="h",
                     yanchor="bottom",
-                    y=1.01,
-                    xanchor="right",
-                    x=1,
+                    y=1.04,
+                    xanchor="left",
+                    x=0,
                 ),
-                margin=dict(l=20, r=20, t=70, b=20),
+                margin=dict(l=20, r=20, t=110, b=20),
             )
             fig.update_yaxes(title_text="價格", row=1, col=1)
             fig.update_yaxes(title_text="淨值 (倍數)", row=2, col=1)
