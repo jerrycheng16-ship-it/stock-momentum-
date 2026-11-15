@@ -10,28 +10,114 @@ import yfinance as yf
 st.set_page_config(page_title="波動度濾網與均線策略回測", layout="wide")
 st.title("📈 波動度狀態切換 × 均線策略回測系統")
 
-# 內建常用隱含波動度指數清單
+# 內建常用隱含波動度指數清單（新增 ^MOVE 美債波動率指數）
 IV_OPTIONS = {
     "^VIX (S&P 500 恐慌指數 - 美股大盤)": "^VIX",
     "^VXN (Nasdaq 100 波動率 - 科技/半導體)": "^VXN",
+    "^MOVE (ICE BofA 美債波動率 - 公債/利率)": "^MOVE",
+    "^GVZ (黃金波動率指數 - 避險貴金屬)": "^GVZ",
+    "^OVX (原油波動率指數 - 能源/通膨)": "^OVX",
     "^RVX (Russell 2000 波動率 - 中小型股)": "^RVX",
     "^VXD (道瓊工業波動率 - 藍籌傳產)": "^VXD",
     "^VVIX (VIX 的波動率 - 尾部風險預警)": "^VVIX",
     "^VXAPL (Apple 蘋果隱含波動率)": "^VXAPL",
     "^VXAZN (Amazon 亞馬遜隱含波動率)": "^VXAZN",
     "^VXGOG (Google 隱含波動率)": "^VXGOG",
-    "^OVX (原油波動率指數 - 能源/通膨)": "^OVX",
-    "^GVZ (黃金波動率指數 - 避險貴金屬)": "^GVZ",
     "自訂輸入代號...": "CUSTOM",
 }
 
+# 三大資產類別快速參數範本
+PRESET_CONFIGS = {
+    "📈 美股指數模式 (SPY + ^VIX)": {
+        "ticker": "SPY",
+        "vol_source": "外部隱含波動度指數 (IV Index)",
+        "iv_label": "^VIX (S&P 500 恐慌指數 - 美股大盤)",
+        "timeframe": "月線 (Monthly)",
+        "ma_window": 6,
+        "vol_mode": "4. 標準化波動度 + 均線交叉雙重過濾 (高低檔位觸發)",
+        "z_window": 12,
+        "z_ma_window": 3,
+        "z_low_thresh": -0.5,
+        "z_high_thresh": 0.5,
+        "dual_direction": "高檔下破均線 → 趨勢盤｜低檔上穿均線 → 盤整盤",
+        "breakdown_action": "平倉空手 (部位 = 0)",
+        "consolidation_action": "維持買入部位 (部位 = +1)",
+    },
+    "🥇 黃金貴金屬模式 (GLD + ^GVZ)": {
+        "ticker": "GLD",
+        "vol_source": "外部隱含波動度指數 (IV Index)",
+        "iv_label": "^GVZ (黃金波動率指數 - 避險貴金屬)",
+        "timeframe": "月線 (Monthly)",
+        "ma_window": 6,
+        "vol_mode": "4. 標準化波動度 + 均線交叉雙重過濾 (高低檔位觸發)",
+        "z_window": 12,
+        "z_ma_window": 3,
+        "z_low_thresh": -0.5,
+        "z_high_thresh": 0.5,
+        "dual_direction": "低檔上穿均線 → 趨勢盤｜高檔下破均線 → 盤整盤",
+        "breakdown_action": "平倉空手 (部位 = 0)",
+        "consolidation_action": "維持買入部位 (部位 = +1)",
+    },
+    "🏦 美國公債模式 (TLT + ^MOVE)": {
+        "ticker": "TLT",
+        "vol_source": "外部隱含波動度指數 (IV Index)",
+        "iv_label": "^MOVE (ICE BofA 美債波動率 - 公債/利率)",
+        "timeframe": "月線 (Monthly)",
+        "ma_window": 6,
+        "vol_mode": "4. 標準化波動度 + 均線交叉雙重過濾 (高低檔位觸發)",
+        "z_window": 12,
+        "z_ma_window": 3,
+        "z_low_thresh": -0.5,
+        "z_high_thresh": 0.5,
+        "dual_direction": "高檔下破均線 → 趨勢盤｜低檔上穿均線 → 盤整盤",
+        "breakdown_action": "平倉空手 (部位 = 0)",
+        "consolidation_action": "維持買入部位 (部位 = +1)",
+    },
+}
+
+
+def apply_preset_callback():
+    selected = st.session_state["preset_selector"]
+    cfg = PRESET_CONFIGS[selected]
+    st.session_state["ticker_input"] = cfg["ticker"]
+    st.session_state["vol_source_radio"] = cfg["vol_source"]
+    st.session_state["iv_label_select"] = cfg["iv_label"]
+    st.session_state["timeframe_radio"] = cfg["timeframe"]
+    st.session_state["ma_window_num"] = cfg["ma_window"]
+    st.session_state["vol_mode_select"] = cfg["vol_mode"]
+    st.session_state["z_window_num"] = cfg["z_window"]
+    st.session_state["z_ma_window_num"] = cfg["z_ma_window"]
+    st.session_state["z_low_slider"] = cfg["z_low_thresh"]
+    st.session_state["z_high_slider"] = cfg["z_high_thresh"]
+    st.session_state["dual_dir_radio"] = cfg["dual_direction"]
+    st.session_state["breakdown_radio"] = cfg["breakdown_action"]
+    st.session_state["consolidation_radio"] = cfg["consolidation_action"]
+
+
+# 初始化 Session State 預設值（初次載入套用美股指數模式）
+if "initialized" not in st.session_state:
+    st.session_state["initialized"] = True
+    st.session_state["preset_selector"] = "📈 美股指數模式 (SPY + ^VIX)"
+    apply_preset_callback()
+
+
 # --- 側邊欄參數設定 ---
 with st.sidebar:
+    st.header("⚡ 快速參數範本")
+    st.selectbox(
+        "選擇資產類別參數範本（一鍵套用）",
+        options=list(PRESET_CONFIGS.keys()),
+        key="preset_selector",
+        on_change=apply_preset_callback,
+        help="切換後會自動更新下方所有對應參數；套用後仍可手動修改標的代號（例如將 SPY 改為 QQQ，或將 TLT 改為 IEF）。",
+    )
+
+    st.markdown("---")
     st.header("⚙️ 策略參數設定")
     ticker = st.text_input(
         "輸入交易標的代號 (股票或 ETF)",
-        value="SPY",
-        help="台股請加 .TW 或 .TWO (例如: 0050.TW, 2330.TW)，美股直接輸入 (例如: SPY, QQQ, SMH)",
+        key="ticker_input",
+        help="台股請加 .TW 或 .TWO (例如: 0050.TW, 2330.TW)，美股直接輸入 (例如: SPY, QQQ, GLD, TLT)",
     )
 
     vol_source = st.radio(
@@ -40,7 +126,7 @@ with st.sidebar:
             "標的自身歷史波動度 (HV)",
             "外部隱含波動度指數 (IV Index)",
         ],
-        index=1,
+        key="vol_source_radio",
         help="HV：依據標的自身過去漲跌幅計算；IV Index：抓取市場恐慌/隱含波動率指數作為領先情緒濾網。",
     )
     use_external_iv = vol_source == "外部隱含波動度指數 (IV Index)"
@@ -50,8 +136,8 @@ with st.sidebar:
         selected_iv_label = st.selectbox(
             "選擇隱含波動度指數",
             options=list(IV_OPTIONS.keys()),
-            index=0,
-            help="直接從下拉選單選擇對應市場的 30 天期隱含波動率指數，無需手動輸入。",
+            key="iv_label_select",
+            help="直接從下拉選單選擇對應市場的隱含波動率指數，無需手動輸入。",
         )
         if IV_OPTIONS[selected_iv_label] == "CUSTOM":
             iv_ticker = st.text_input("請輸入自訂波動率指數代號", value="^VIX")
@@ -61,7 +147,7 @@ with st.sidebar:
     timeframe = st.radio(
         "資料頻率（觀察週期）",
         options=["日線 (Daily)", "月線 (Monthly)"],
-        index=1,
+        key="timeframe_radio",
         horizontal=True,
         help="日線：每日收盤計算指標，次日執行；月線：每月最後交易日收盤計算指標，次月執行。",
     )
@@ -79,7 +165,6 @@ with st.sidebar:
     st.subheader(f"📐 指標週期設定（單位：{unit_label}）")
 
     default_vol_win = 12 if is_monthly else 252
-    default_ma_win = 6 if is_monthly else 126
 
     if not use_external_iv:
         vol_window = st.number_input(
@@ -100,9 +185,9 @@ with st.sidebar:
         f"價格均線週期 ({unit_label})",
         min_value=2,
         max_value=60 if is_monthly else 500,
-        value=default_ma_win,
+        key="ma_window_num",
         step=1,
-        help=f"目前為{timeframe}模式：預設 {default_ma_win} {unit_label}（半年線）。",
+        help=f"目前為{timeframe}模式：預設 6 {unit_label}（半年線）。",
     )
 
     st.markdown("---")
@@ -116,7 +201,7 @@ with st.sidebar:
             "3. 波動度與其均線交叉 (波動度均線)",
             "4. 標準化波動度 + 均線交叉雙重過濾 (高低檔位觸發)",
         ],
-        index=3,
+        key="vol_mode_select",
         help="模式 4 結合標準化波動度高低檔位與均線突破/跌破，採用狀態記憶機制避免頻繁切換。",
     )
 
@@ -210,14 +295,14 @@ with st.sidebar:
             f"標準化滾動基準週期 ({unit_label})",
             min_value=5 if is_monthly else 20,
             max_value=120 if is_monthly else 1000,
-            value=12 if is_monthly else 252,
+            key="z_window_num",
             step=1,
         )
         z_ma_window = st.number_input(
             f"標準化波動度均線週期 ({unit_label})",
             min_value=2,
             max_value=60 if is_monthly else 500,
-            value=3 if is_monthly else 63,
+            key="z_ma_window_num",
             step=1,
         )
         extra_lookback = z_window + z_ma_window
@@ -226,14 +311,14 @@ with st.sidebar:
             "低檔水準門檻 (Z-Score 下界 σ)",
             min_value=-2.5,
             max_value=1.0,
-            value=-0.5,
+            key="z_low_slider",
             step=0.1,
         )
         z_high_thresh = st.slider(
             "高檔水準門檻 (Z-Score 上界 σ)",
             min_value=-1.0,
             max_value=2.5,
-            value=0.5,
+            key="z_high_slider",
             step=0.1,
         )
 
@@ -243,7 +328,7 @@ with st.sidebar:
                 "低檔上穿均線 → 趨勢盤｜高檔下破均線 → 盤整盤",
                 "高檔下破均線 → 趨勢盤｜低檔上穿均線 → 盤整盤",
             ],
-            index=1,
+            key="dual_dir_radio",
         )
         is_low_cross_up_trend = (
             dual_direction
@@ -264,7 +349,7 @@ with st.sidebar:
             "平倉空手 (部位 = 0)",
             "反向做空 (部位 = -1)",
         ],
-        index=0,
+        key="breakdown_radio",
     )
     short_on_breakdown = breakdown_action == "反向做空 (部位 = -1)"
     breakdown_text = "反向做空 (-1)" if short_on_breakdown else "平倉空手 (0)"
@@ -273,12 +358,10 @@ with st.sidebar:
         "盤整盤時的交易動作",
         options=[
             "維持買入部位 (部位 = +1)",
-            "維持前一日部位 (不動作)"
-            if not is_monthly
-            else "維持前一月部位 (不動作)",
+            "維持前一期部位 (不動作)",
             "全部平倉空手 (部位 = 0)",
         ],
-        index=0,
+        key="consolidation_radio",
     )
 
     st.markdown("---")
@@ -395,12 +478,11 @@ if ticker:
             )
             if iv_raw.empty:
                 st.error(
-                    f"找不到隱含波動度指數 `{iv_ticker}` 的資料，請確認代號是否正確（例如 ^VIX, ^VXN）。"
+                    f"找不到隱含波動度指數 `{iv_ticker}` 的資料，請確認代號是否正確（例如 ^VIX, ^GVZ, ^MOVE）。"
                 )
                 iv_load_failed = True
             else:
                 if is_monthly:
-                    # 修正：使用 pd.Series 包裝 map 結果後再呼叫 ffill()，相容 Pandas 2.0+
                     iv_monthly_map = (
                         (iv_raw["Close"] / 100.0)
                         .groupby(iv_raw.index.to_period("M"))
@@ -546,7 +628,9 @@ if ticker:
                     else "盤整盤 (執行盤整規則)"
                 )
 
-                st.subheader(f"🚦 {ticker.upper()} 最新即時交易訊號")
+                st.subheader(
+                    f"🚦 {ticker.upper()} 最新即時交易訊號【{st.session_state['preset_selector']}】"
+                )
                 sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
 
                 with sig_col1:
