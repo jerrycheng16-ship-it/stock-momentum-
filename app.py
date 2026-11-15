@@ -745,3 +745,76 @@ if ticker:
                     line_color="#F43F5E",
                     annotation_text=f"高檔 ({z_high_thresh:.1f}σ)",
                     row=4,
+                    col=1,
+                )
+                fig.add_hline(
+                    y=z_low_thresh,
+                    line_dash="dot",
+                    line_color="#22C55E",
+                    annotation_text=f"低檔 ({z_low_thresh:.1f}σ)",
+                    row=4,
+                    col=1,
+                )
+
+            # 標示趨勢盤與盤整盤區間（無縫銜接）
+            df["Regime_Group"] = (
+                df["Is_Trend"] != df["Is_Trend"].shift()
+            ).cumsum()
+            groups = list(df.groupby("Regime_Group"))
+
+            for i, (_, group) in enumerate(groups):
+                is_trend = group["Is_Trend"].iloc[0]
+                x0 = group.index[0]
+                x1 = (
+                    groups[i + 1][1].index[0]
+                    if i + 1 < len(groups)
+                    else group.index[-1]
+                )
+
+                fill_color = (
+                    "rgba(56, 189, 248, 0.16)"
+                    if is_trend
+                    else "rgba(251, 146, 60, 0.14)"
+                )
+
+                for r in [1, 2]:
+                    fig.add_vrect(
+                        x0=x0,
+                        x1=x1,
+                        fillcolor=fill_color,
+                        layer="below",
+                        line_width=0,
+                        row=r,
+                        col=1,
+                    )
+
+            # 圖表版面配置
+            fig.update_layout(
+                height=1120,
+                hovermode="x unified",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.04,
+                    xanchor="left",
+                    x=0,
+                ),
+                margin=dict(l=20, r=20, t=120, b=20),
+            )
+            fig.update_yaxes(title_text="價格", row=1, col=1)
+            fig.update_yaxes(title_text="淨值 (倍數)", row=2, col=1)
+            fig.update_yaxes(title_text="回撤 (%)", row=3, col=1)
+            fig.update_yaxes(title_text=vol_y_title, row=4, col=1)
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 7. 盤勢與倉位狀態統計摘要
+            trend_pct = df["Is_Trend"].mean() * 100
+            long_pct = (df["Position"] == 1).mean() * 100
+            flat_pct = (df["Position"] == 0).mean() * 100
+            short_pct = (df["Position"] == -1).mean() * 100
+
+            st.info(
+                f"💡 **區間與倉位統計（{timeframe}）**：回測期間內**趨勢盤**佔比 `{trend_pct:.1f}%`、**盤整盤**佔比 `{100-trend_pct:.1f}%`｜"
+                f"倉位時間分佈：**做多** `{long_pct:.1f}%`、**空手** `{flat_pct:.1f}%`、**做空** `{short_pct:.1f}%`。"
+            )
